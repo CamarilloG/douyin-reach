@@ -13,4 +13,4 @@
 
 ## 仓库
 
-GitHub: [Douyin Reach](https://github.com/CamarilloG/douyin-reach)（创建后更新此链接）
+GitHub: https://github.com/CamarilloG/douyin-reach
