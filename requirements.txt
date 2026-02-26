@@ -1,0 +1,6 @@
+# Douyin Reach 后端依赖
+# Python 3.10+（建议 3.10–3.12，3.14 需编译 greenlet 等）
+
+pywebview>=4.0
+playwright>=1.40
+python-dotenv>=1.0.0

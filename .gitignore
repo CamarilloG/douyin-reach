@@ -17,6 +17,7 @@ build/
 .vscode/
 *.swp
 *.swo
+node_modules/
 
 # OS
 .DS_Store
@@ -28,6 +29,10 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+data/
+cookies/
+cookies.json
+storage_state.json
 
 # Logs
 *.log
