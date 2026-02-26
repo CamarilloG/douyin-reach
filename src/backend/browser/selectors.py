@@ -43,6 +43,8 @@ USER_PAGE_DM_BUTTON = "私信"
 # ---------- 风控 / 危险检测 ----------
 # 页面出现以下文案视为危险，立即停止
 DANGER_PAGE_TEXTS = ("账号异常", "验证码", "滑块", "安全验证")
+# 登录浮层：页面出现以下文案视为未登录或登录浮层已弹出，终止流程并需用户先登录
+LOGIN_OVERLAY_TEXTS = ("扫码登录", "验证码登录")
 
 # ---------- 评论列表接口（www-hj 域名，用于可选接口拉取） ----------
 COMMENT_LIST_API_TEMPLATE = "https://www-hj.douyin.com/aweme/v1/web/comment/list/"

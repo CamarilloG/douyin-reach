@@ -142,6 +142,26 @@ class BrowserEngine:
         except Exception as e:
             logger.debug("检测危险文案时出错: %s", e)
 
+    async def _check_login_required(self) -> bool:
+        """
+        检测未登录或登录浮层：先校验 session，再检测页面是否出现登录浮层文案。
+        若需要用户先登录则触发 danger 并返回 True，调用方应终止流程。
+        """
+        if not self._page:
+            return False
+        try:
+            if not await self._check_session_no_navigate():
+                self._risk_state.trigger_danger("未登录或 session 已失效，请先完成登录")
+                return True
+            content = await self._page.content()
+            for text in sel.LOGIN_OVERLAY_TEXTS:
+                if text in content:
+                    self._risk_state.trigger_danger("检测到登录浮层，请先完成登录")
+                    return True
+        except Exception as e:
+            logger.debug("检测登录状态/浮层时出错: %s", e)
+        return False
+
     def _on_element_not_found(self, selector_desc: str) -> bool:
         """元素未找到时调用：连续 2 次触发预警。"""
         self._consecutive_not_found += 1
@@ -271,12 +291,16 @@ class BrowserEngine:
         """搜索关键词，返回视频列表（标题、aweme_id、作者昵称、sec_uid、点赞数）。"""
         if not self._page or self._risk_state.level == RiskLevel.DANGER:
             return []
+        if await self._check_login_required():
+            return []
         url = sel.SEARCH_URL_TEMPLATE.format(keyword=quote(keyword))
         try:
             await self._page.goto(url, wait_until="domcontentloaded", timeout=20000)
             await self._risk_state.delay_page()
             await self._check_danger_texts()
             if self._risk_state.level == RiskLevel.DANGER:
+                return []
+            if await self._check_login_required():
                 return []
 
             # #region agent log
@@ -410,11 +434,15 @@ class BrowserEngine:
         """拉取视频一级评论（cid、内容、昵称、sec_uid、点赞数、时间）。"""
         if not self._page or self._risk_state.level == RiskLevel.DANGER:
             return []
+        if await self._check_login_required():
+            return []
         try:
             await self._page.goto(video_url, wait_until="domcontentloaded", timeout=20000)
             await self._risk_state.delay_page()
             await self._check_danger_texts()
             if self._risk_state.level == RiskLevel.DANGER:
+                return []
+            if await self._check_login_required():
                 return []
 
             comments: list[dict[str, Any]] = []
@@ -485,12 +513,16 @@ class BrowserEngine:
         """从用户主页补全信息（粉丝数、关注数、简介、是否认证）。频率需由调用方控制。"""
         if not self._page or self._risk_state.level == RiskLevel.DANGER:
             return {}
+        if await self._check_login_required():
+            return {}
         url = sel.USER_URL_TEMPLATE.format(sec_uid=sec_uid)
         try:
             await self._page.goto(url, wait_until="domcontentloaded", timeout=15000)
             await self._risk_state.delay_page()
             await self._check_danger_texts()
             if self._risk_state.level == RiskLevel.DANGER:
+                return {}
+            if await self._check_login_required():
                 return {}
 
             info: dict[str, Any] = {

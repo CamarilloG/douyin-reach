@@ -17,7 +17,17 @@
 
 ## 安装与运行
 
-### 1. 后端
+### 0. 一键配置（推荐）
+
+在项目根目录执行，自动创建 venv、安装后端依赖、安装 Playwright Chromium、创建 data/logs、前端 npm install：
+
+```bash
+python scripts/setup_env.py
+```
+
+若完整 `pip install -r requirements.txt` 失败（如 Windows 编码或 pywebview 编译问题），脚本会自动改为只装 `playwright` 与 `python-dotenv`。
+
+### 1. 后端（手动）
 
 ```bash
 python -m venv venv
