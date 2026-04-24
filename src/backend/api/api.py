@@ -52,6 +52,10 @@ class Api:
         """获取任务日志。"""
         raise NotImplementedError
 
+    def clear_logs(self, task_id: int) -> dict[str, Any]:
+        """清空指定任务的日志(从 operation_logs 表删除)。返回 {ok, deleted}."""
+        raise NotImplementedError
+
     # ---------- 筛选与名单 ----------
     def run_filter(self, task_id: int) -> bool:
         """对已采集任务执行规则筛选。"""

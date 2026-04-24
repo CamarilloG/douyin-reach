@@ -1,0 +1,93 @@
+# 抖音创作者中心「私信模块」请求构建分析
+
+基于对 `creator.douyin.com/creator-micro/data/following/chat` 页面的网络请求抓取和 Protobuf 反向解析，私信模块由两套完全不同的 API 体系协同工作。
+
+## 一、两套 API 体系
+
+**1. 创作者业务 HTTP API**（主机 `creator.douyin.com`，JSON 协议）
+用于用户信息补全、关注关系查询等"辅助"查询。
+
+- `POST /aweme/v1/creator/im/user_detail/` — 根据 sec_uid 获取对方用户详细信息（头像、昵称）
+- `POST /aweme/v1/creator/relation/multi/is/follower/` — 批量判断这些 sec_uid 是否为我的粉丝
+- `POST https://mssdk.bytedance.com/web/common?ms_appid=2906` — 风控签名 SDK，用于生成 `msToken`
+
+**2. IM 长连接 API**（主机 `imapi.douyin.com`，Protobuf 协议）
+真正的会话/消息数据通道。
+
+- `POST /v2/message/get_by_user_init` — 首屏拉取最近会话列表（朋友私信）
+- `POST /v1/stranger/get_conversation_list` — 陌生人私信列表
+- `POST /v1/message/get_by_user` — 增量拉取用户消息
+- `POST /v1/message/get_by_conversation` — 拉取某个会话的历史消息
+- `POST /v3/conversation/mark_read` — 标记已读
+- `POST /v1/conversation/batch_get_conversation_participants_readindex` — 批量获取会话成员已读索引
+
+## 二、HTTP API 的构建方式
+
+每个 `creator.douyin.com/aweme/v1/...` 请求会在 query string 中自动追加一大批"设备/环境指纹 + 风控签名"参数，这套机制是抖音 Web 前端统一拦截器注入的。关键参数包括：
+
+`aid=2906`（创作者平台 app id）、`app_name=aweme_creator_platform`、`device_platform=web`、`user_agent`、`cookie_enabled`、`screen_width/height`、`browser_language`、`browser_platform`、`browser_name`、`browser_version`、`browser_online`、`timezone_name`，再加上最关键的两个风控字段：
+
+- `msToken` — 固定长度（128字节左右）的 token，由 `mssdk.bytedance.com` 在页面加载时颁发并周期性刷新
+- `a_bogus` — 每次请求时根据 URL、body、msToken、UA、时间戳等在前端 JS 中计算出的签名（类似旧的 `_signature`/`X-Bogus` 的替代），缺失或错误会导致 403
+
+请求体是 JSON，例如 `multi/is/follower` 的 body：
+
+```json
+{"user_ids":["MS4wLjABAAAADV3vUAo...","MS4wLjABAAAAVNMrkoRPnu..."]}
+```
+
+`user_ids` 是 Base64 风格的 `sec_uid`（抖音用户的安全 UID）。
+
+## 三、IM 核心通道（Protobuf 二进制协议）
+
+IM 请求的 `Content-Type` 是 `application/x-protobuf`，`Accept` 也是 `application/x-protobuf`，Body 是 Protobuf 编码的二进制。通过反向解析字节流，每个请求统一采用同一个"外层信封"（RequestBody / Frame）：
+
+```
+field 1  varint  cmd_id           例: 301 (get_by_conversation), 1874/0x752 (mark_read)
+field 2  varint  sequence_id      客户端自增请求序号，例 10037
+field 3  string  sdk_version      "1.3.0"
+field 4  string  token            (Web 端为空，走 cookie)
+field 5  varint  platform         3 = Web
+field 6  varint  device_platform
+field 7  string  app_version      "f1e96de:master"  (前端 release hash)
+field 8  bytes   payload          业务 message 的 protobuf 编码
+field 9  string  device_id        (空)
+field 11 string  channel          "douyin_creator"
+field 15 message headers (key/value 列表，重复):
+           - aid_new = ""
+           - app_name = "douyin_creator"
+           - is-retry = "0"
+field 18 varint  flags            1
+field 21 string  client_name      "douyin_creator"
+field 22 string  sdk_name         "web_sdk"
+```
+
+其中 `field 8` 是真正的业务 payload。例如 `get_by_conversation` 的 payload 展开为：
+
+```
+field 1  string  conversation_id   "0:1:106392825459:1443004796648119"
+field 2  varint  conversation_type 1 (单聊)
+field 3  varint  conversation_short_id  7628198708143866374
+field 4  varint  direction         1 (older)
+field 5  varint  anchor_index      0
+field 6  varint  limit             20
+field 11 string  channel           "douyin_creator"
+```
+
+`conversation_id` 的格式很有规律：`{inbox_type}:{conv_type}:{user_id_A}:{user_id_B}`，单聊中两个 user_id 是本人和对方的 long uid（排序固定）。服务端可据此定位唯一会话。
+
+`mark_read` 的 payload 则是 `{conversation_id, conversation_short_id, conversation_type, read_index, badge_count ...}` 等字段。
+
+## 四、整体调用链路（打开一个会话时）
+
+1. 页面加载时 `mssdk` 先颁发 `msToken`，后续所有 `creator.douyin.com` 请求在 URL 上带 `msToken + a_bogus`。
+2. `imapi` 先调 `get_by_user_init` 拉最近会话列表，返回的每条包含 `sec_uid` 列表。
+3. 前端用这些 `sec_uid` 调 `creator/im/user_detail/` 和 `relation/multi/is/follower/` 补全头像昵称 + 判断是否粉丝。
+4. 点击某条会话 → 发 `get_by_conversation`（Protobuf）拉历史消息 → 同时发 `mark_read` 标记已读，还有 `batch_get_conversation_participants_readindex` 查对方读到哪条。
+5. 发送消息（未触发，但同通道同信封结构）会命中 `imapi` 的 send cmd，body 结构类似，payload 里包含 `conversation_id / content(JSON 字符串) / client_message_id / message_type` 等。
+
+## 五、关键工程要点
+
+整个私信模块的"请求构建"可以概括为三层封装：最外层是通用 HTTP 环境/签名参数（msToken + a_bogus，由前端风控 SDK 统一生成）；中间层 IM 通道用自研 Protobuf 帧协议，cmd_id 路由到不同业务；最内层 payload 才是业务语义字段。创作者平台把 IM SDK（`web_sdk` / `sdk_version 1.3.0`）直接嵌入页面，会话 ID 的拼接规则固定，便于前后端无状态恢复会话。补全类数据（昵称、关注关系）不走 IM 通道，而是复用创作者侧 HTTP API，属于典型的"IM 只负责消息、业务信息另走 HTTP"的拆分。
+
+需要我继续深入分析某个具体接口（比如发送消息的完整字段、或者 `a_bogus` 的签名算法）吗？

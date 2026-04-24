@@ -1,0 +1,114 @@
+完美。全部 4 个选择器都拿到了。下面整理最终答案。
+
+---
+
+# 4 个创作者中心 DOM 选择器
+
+**页面**：`https://creator.douyin.com/creator-micro/data/following/chat`  
+**DOM 框架**：Semi Design（字节自研 UI 库），非 Shadow DOM/iframe，直接查询即可。
+
+---
+
+## ① 会话列表单项（整行容器）
+
+```css
+li.semi-list-item
+```
+
+- 标签：`<li role="list-item">`
+- 选中状态会追加 hash 后缀类 `active-BApUO3`（即当前被点开的那条）
+- 内部子结构：`.semi-list-item > .semi-list-item-body > .semi-list-item-body-header(头像) + .semi-list-item-body-main(右侧信息)`
+
+⚠️ **DOM 里不存在 sec_uid 锚点**：整行没有 href，`<a>` 标签是空的，头像 `<a>` 不带 href，聊天头部"查看Ta的主页"也是 span（非链接）。**sec_uid 只能通过 React 内部状态获取**，或通过 imapi `get_info_list` 返回的 `conversation_id → participants` 映射表映射。
+
+### 定位"刚新加的会话"的三种可行方案
+
+| 方案 | 选择器 | 说明 |
+|------|--------|------|
+| A. 按顺序（推荐） | `li.semi-list-item:first-child` | 新会话总是置顶第一条 |
+| B. 按时间戳 | `li.semi-list-item:has(.item-header-time-XtnnBd:contains("刚刚"))` | 用 XPath 或 JS 过滤："刚刚" = 1 分钟内 |
+| C. 按昵称 | `li.semi-list-item:has(.item-header-name-eukBdz)` 后文本匹配 | 通过昵称 "KeLep" 过滤 |
+
+---
+
+## ② 会话列表项内的昵称锚点
+
+```css
+.item-header-name-eukBdz
+```
+
+- 标签：`<span class="item-header-name-eukBdz">KeLep</span>`
+- **类名含 hash 后缀**（`-eukBdz`），部署后可能变化 —— 建议用 CSS 包含选择器：`span[class*="item-header-name"]`
+- 同层还有：
+  - `.item-header-time-XtnnBd`（右上时间戳："刚刚"/"16:20"/"昨天"/"04-17"）
+  - `.text-W2RFz4`（消息预览文字："测试2-请勿回复-20260421"）
+
+### 匹配用户的推荐姿势
+
+```js
+const row = Array.from(document.querySelectorAll('li.semi-list-item'))
+  .find(li => li.querySelector('[class*="item-header-name"]')?.textContent.trim() === 'KeLep');
+```
+
+（因为 DOM 拿不到 sec_uid，只能靠**昵称**或**顺序**匹配。考虑到重名，建议进入会话后再用 imapi `user_detail` 回请求体对齐 sec_uid。）
+
+---
+
+## ③ 聊天输入框
+
+```css
+div.chat-input-nSWBco[contenteditable="true"]
+```
+
+- 标签：`<div class="chat-input-nSWBco" contenteditable="true">`
+- **类型：`contenteditable` div**，**不是** `<textarea>`、**不是** `<input>`、**不是** DraftJS（已验证 `isDraftJS: false`，内部无 `DraftEditor-root` 或 `[data-contents="true"]` 节点）
+- 父层链：`div.chat-editor-X6QnIU > div.chat-input-nSWBco`
+- 外层容器：`div.box-container-yGo0TJ`
+- 占位文字（`placeholder` 属性不存在，是 CSS 伪元素或兄弟节点）："按回车即发送，shift+enter换行…"
+- 类名建议用模糊匹配：`div[class*="chat-input"][contenteditable="true"]`
+
+### 注入文本的正确姿势
+
+因为是 contenteditable 而不是 input，`el.value = '...'` **无效**。需要：
+
+```js
+const el = document.querySelector('div[class*="chat-input"][contenteditable="true"]');
+el.focus();
+// 方案1：直接 innerText（React 可能覆盖）
+// el.innerText = '测试';
+// 方案2：用 execCommand（兼容）
+document.execCommand('insertText', false, '测试-请勿回复');
+// 方案3：dispatch input event（推荐）
+```
+
+---
+
+## ④ 发送按钮
+
+```css
+button.semi-button.chat-btn
+```
+
+- 标签：`<button type="button" class="semi-button chat-btn">`
+- `innerText` = `"发送"`（纯中文文本，**无** `aria-label`）
+- 禁用态会追加类：`semi-button-disabled`，同时 DOM 属性 `disabled=true`
+- **输入框为空时按钮是 `disabled`**，必须先往输入框塞文本并触发 input 事件才能点击生效
+- 父容器：`div.chat-footer-tJyoWs`
+
+### 等待按钮激活的姿势
+
+```js
+const btn = document.querySelector('button.chat-btn');
+// 等到 .semi-button-disabled 类被移除
+if (!btn.disabled) btn.click();
+```
+
+---
+
+## 变动风险预警（重要）
+
+| 风险项 | 说明 |
+|--------|------|
+| **所有短 hash 类名** (`-eukBdz`、`-nSWBco`、`-BApUO3`、`-tJyoWs` 等) | CSS-in-JS 生成的 hash，**每次发版都会变**。生产代码必须用 `[class*="item-header-name"]`、`[class*="chat-input"]`、`[class*="chat-btn"]` 这种**前缀包含匹配** |
+| **稳定的锚点** | `li.semi-list-item`、`button.chat-btn`、`div.chat-editor-X6QnIU` 的非 hash 部分（`semi-list-item`、`chat-btn`、`chat-editor`）是业务命名，稳定性高 |
+| **sec_uid 不在 DOM** | 所有行都没有 data-* 属性携带 sec_uid，**DOM 层无法直接定位到指定用户**。要么走「主站主页一次就建好会话」+「创作者中心按昵称/顺序找」，要么拦 `conversation/get_info_list` 的 protobuf 响应解出 conversation_id ↔ sec_uid 映射 |

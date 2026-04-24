@@ -1,94 +1,140 @@
 <template>
-  <n-space vertical>
-    <n-h4 style="margin: 0">发送历史</n-h4>
-    <n-space>
+  <n-space vertical :size="16">
+    <n-h4 style="margin: 0">历史记录（任务执行）</n-h4>
+    <n-space align="center">
       <n-select
-        v-model:value="taskId"
-        :options="taskOptions"
-        placeholder="选择任务"
-        style="width: 200px"
-        @update:value="load"
+        v-model:value="filterTaskId"
+        :options="taskOptionsAll"
+        placeholder="筛选任务"
+        style="width: 220px"
+        clearable
+        @update:value="onFilterChange"
       />
+      <n-input v-model:value="startDate" placeholder="开始时间 YYYY-MM-DD" style="width: 180px" />
+      <n-input v-model:value="endDate" placeholder="结束时间 YYYY-MM-DD" style="width: 180px" />
       <n-button @click="load">刷新</n-button>
-      <n-button @click="exportCsv">导出 CSV</n-button>
     </n-space>
     <n-data-table
       :columns="columns"
       :data="items"
       :loading="loading"
       :pagination="pagination"
-      @update:page="onPage"
+      remote
     />
   </n-space>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, h } from 'vue'
-import { NSpace, NDataTable, NSelect, NButton, NTag, NH4 } from 'naive-ui'
+import { ref, reactive, onMounted, h } from 'vue'
+import { useRouter } from 'vue-router'
+import { NSpace, NDataTable, NSelect, NButton, NTag, NH4, NInput, useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { bridge, isApiAvailable } from '@/api/bridge'
 
-const taskId = ref<number | null>(null)
-const taskOptions = ref<{ label: string; value: number }[]>([])
-const items = ref<Record<string, unknown>[]>([])
+const message = useMessage()
+const router = useRouter()
+const filterTaskId = ref<number | null>(null)
+const taskOptionsAll = ref<{ label: string; value: number }[]>([])
+const items = ref<Record<string, any>[]>([])
 const loading = ref(false)
-const page = ref(1)
-const pageSize = ref(20)
-const pagination = ref({ page: 1, pageSize: 20, itemCount: 0, showSizePicker: true, pageSizes: [10, 20, 50] })
+const startDate = ref<string>('')
+const endDate = ref<string>('')
 
-const columns: DataTableColumns<Record<string, unknown>> = [
-  { title: '时间', key: 'time', width: 160 },
-  { title: '用户', key: 'nickname', width: 100 },
-  { title: '任务', key: 'task_name', width: 120 },
+const pagination = reactive({
+  page: 1,
+  pageSize: 20,
+  itemCount: 0,
+  showSizePicker: true,
+  pageSizes: [10, 20, 50],
+  prefix: (info: { itemCount?: number }) => `共 ${info.itemCount ?? 0} 条`,
+  onChange: (p: number) => { pagination.page = p; void load() },
+  onUpdatePageSize: (s: number) => { pagination.pageSize = s; pagination.page = 1; void load() },
+})
+
+const STATUS_META: Record<string, { label: string; type: 'success' | 'info' | 'warning' | 'error' | 'default' }> = {
+  running: { label: '运行中', type: 'info' },
+  completed: { label: '已完成', type: 'success' },
+  failed: { label: '失败', type: 'error' },
+  stopped: { label: '已停止', type: 'warning' },
+}
+
+const columns: DataTableColumns<Record<string, any>> = [
+  { title: '任务', key: 'task_name', width: 160, render: (row) => row.task_name || `#${row.task_id}` },
+  { title: '开始时间', key: 'started_at', width: 160 },
+  { title: '结束时间', key: 'ended_at', width: 160, render: (row) => row.ended_at || '—' },
   {
-    title: '状态',
-    key: 'status',
-    width: 90,
-    render: (row) =>
-      row.status === 'success'
-        ? h(NTag, { type: 'success', size: 'small' }, () => '成功')
-        : h(NTag, { type: 'error', size: 'small' }, () => '失败'),
+    title: '状态', key: 'status', width: 90,
+    render: (row) => {
+      const meta = STATUS_META[String(row.status)] ?? { label: String(row.status), type: 'default' as const }
+      return h(NTag, { size: 'small', type: meta.type, bordered: false }, { default: () => meta.label })
+    },
   },
-  { title: '失败原因', key: 'reason', ellipsis: { tooltip: true } },
+  { title: '视频', key: 'videos_collected', width: 70 },
+  { title: '评论', key: 'comments_collected', width: 70 },
+  { title: '命中', key: 'users_matched', width: 70 },
+  { title: '私信成功', key: 'sent_success', width: 90 },
+  { title: '私信失败', key: 'sent_failed', width: 90 },
+  {
+    title: '操作', key: 'actions', width: 160,
+    render: (row) => {
+      const tid = row.task_id as number
+      const eid = row.id as number
+      return h(NSpace, { size: 4 }, () => [
+        h(NButton, { size: 'small', onClick: () => viewDetail(tid) }, { default: () => '详情' }),
+        h(NButton, { size: 'small', type: 'error', onClick: () => del(eid) }, { default: () => '删除' }),
+      ])
+    },
+  },
 ]
 
 async function loadTasks() {
-  if (!bridge) return
   const list = (await bridge.get_tasks()) as { id: number; name: string }[]
-  taskOptions.value = list.map((t) => ({ label: t.name, value: t.id }))
-  if (list.length && taskId.value == null) taskId.value = list[0].id
+  taskOptionsAll.value = list.map((t) => ({ label: t.name, value: t.id }))
 }
 
 async function load() {
-  if (!bridge || taskId.value == null) return
   loading.value = true
   try {
-    const res = await bridge.get_send_history(taskId.value, page.value, pageSize.value)
-    items.value = res.items as Record<string, unknown>[]
-    pagination.value = {
-      ...pagination.value,
-      page: page.value,
-      pageSize: pageSize.value,
-      itemCount: res.total,
-    }
+    const res = await bridge.get_task_executions(
+      filterTaskId.value,
+      pagination.page,
+      pagination.pageSize,
+      startDate.value || null,
+      endDate.value || null,
+    )
+    items.value = (res.items || []) as Record<string, any>[]
+    pagination.itemCount = res.total ?? 0
+  } catch (e) {
+    console.error(e)
+    message.error('加载执行历史失败')
   } finally {
     loading.value = false
   }
 }
 
-function onPage(p: number) {
-  page.value = p
-  load()
+function onFilterChange() {
+  pagination.page = 1
+  void load()
 }
 
-function exportCsv() {
-  if (!bridge || taskId.value == null) return
-  bridge.export_send_history(taskId.value, '')
+function viewDetail(taskId: number) {
+  router.push({ path: '/audit', query: { task_id: String(taskId) } })
 }
 
-onMounted(() => {
-  if (isApiAvailable()) {
-    loadTasks().then(() => load())
+async function del(execId: number) {
+  try {
+    await bridge.delete_task_execution(execId)
+    message.success('已删除')
+    await load()
+  } catch (e) {
+    console.error(e); message.error('删除失败')
+  }
+}
+
+onMounted(async () => {
+  if (await isApiAvailable()) {
+    await loadTasks()
+    await load()
   }
 })
 </script>

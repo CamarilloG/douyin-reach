@@ -21,7 +21,7 @@ interface PyWebViewApi {
   get_target_users: (task_id: number, page?: number, page_size?: number) => Promise<{ items: unknown[]; total: number; page: number; page_size: number }>
   update_user_selection: (task_id: number, user_ids: number[], selected: boolean) => Promise<boolean>
   export_target_users: (task_id: number, file_path: string) => Promise<string>
-  start_sending: (task_id: number) => Promise<boolean>
+  start_sending: (task_id: number) => Promise<{ ok: boolean; error?: string }>
   pause_sending: (task_id: number) => Promise<boolean>
   stop_sending: (task_id: number) => Promise<boolean>
   get_send_progress: (task_id: number) => Promise<unknown | null>

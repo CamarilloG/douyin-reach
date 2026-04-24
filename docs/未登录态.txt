@@ -1,0 +1,166 @@
+# 登录浮层实测结构（未登录态）
+
+---
+
+## 12. 登录浮层 id / class
+
+**`login-full-panel` 前缀的猜测是准确的。** 实际 id 为 `login-full-panel-{12位随机后缀}`。
+
+完整的 DOM 层级从 `<body>` 开始：
+
+```html
+<body>
+  <!-- 直接挂在 body 下 -->
+  <div id="login-full-panel-tor0v69e64w0">           <!-- 最外层容器，height=0，不可见壳 -->
+    <div class="ezAK2PYX vNSfRbBQ"                    <!-- 遮罩+面板容器，position:fixed; z-index:10001 -->
+         style="position:fixed; z-index:10001; top:0; left:0; width:100%; height:100%;">
+      <div>
+        <svg id="douyin-sidebar-new-mask">…</svg>      <!-- 半透明黑色背景遮罩（可点击关闭） -->
+      </div>
+      <div id="login-panel-new" class="NvD4HzP9">     <!-- 白色面板本体 726×483 -->
+        <div>
+          <div id="douyin-login-new-id" class="douyin_login_new_class">
+            <div class="aBWY4Mqx">
+              <article id="douyin_login_comp_flat_panel" class="m6l1QidV">
+                <!-- 登录内容区 -->
+              </article>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+```
+
+**关键 id/class 汇总：**
+
+| 元素 | id | class | 说明 |
+|------|-----|-------|------|
+| 最外壳 | `login-full-panel-{随机12位}` | （无） | 直接挂在 body 下，本身 height=0 |
+| 遮罩容器 | — | `ezAK2PYX vNSfRbBQ` | `position:fixed; z-index:10001` |
+| 背景蒙层 | `douyin-sidebar-new-mask` | — | `<svg>` 半透明黑色，可点击关闭 |
+| 面板本体 | `login-panel-new` | `NvD4HzP9` | 白色弹窗 |
+| 登录组件根 | `douyin-login-new-id` | `douyin_login_new_class` | |
+| 内容区 | `douyin_login_comp_flat_panel` | `m6l1QidV` | `<article>` 标签 |
+
+> 选择器建议：用 `document.querySelector('[id^="login-full-panel"]')` 匹配最外层，因为后缀是随机的。
+
+---
+
+## 登录面板内部文案与结构
+
+### 标题
+
+```html
+<div class="mV5mWhEp">登录后即可搜索更多精彩视频</div>
+```
+
+注意：此文案可能随触发场景变化（如私信触发时可能不同）。
+
+---
+
+### 左侧：扫码登录
+
+```html
+<div class="ZKVC3H8u">                             <!-- 左列容器 -->
+  <div class="UXzkscqE qXy4xfTo">                  <!-- Tab 项（qXy4xfTo = 选中态） -->
+    <span class="C6OZQwMA">扫码登录</span>
+  </div>
+  <div id="douyin_login_comp_scan_code" class="pE9ZOPEo">
+    <div class="ISm_de1v GMa6xUrj">
+      <div id="animate_qrcode_container" class="J2iCN0Aj">
+        <div class="zzs0DGQV">如何扫码</div>
+        <!-- QR Code 渲染区 -->
+      </div>
+      <p class="qNjfzEhh">
+        打开「抖音APP」点击左上角 📷 扫一扫
+      </p>
+    </div>
+  </div>
+</div>
+```
+
+---
+
+### 右侧：验证码登录 / 密码登录
+
+```html
+<div class="wtBAxcgZ">                              <!-- 右列容器 -->
+  <div class="UXzkscqE ">                           <!-- Tab 项（无 qXy4xfTo = 未选中态） -->
+    <span class="C6OZQwMA">验证码登录</span>
+    <div class="jleLwUR5"><svg>…</svg></div>         <!-- 竖线分隔符 -->
+    <span>密码登录</span>                             <!-- 无特殊 class -->
+  </div>
+
+  <div class="A9isJygL">                             <!-- 表单区域 -->
+    <!-- 手机号输入 -->
+    <div id="douyin_login_comp_normal_input_id" class="C0XgMbmS X5L8kib_">
+      <div class="LghFeUBn">
+        <div class="RyOwPUDZ">
+          <input type="text" class="NGT8cA1w" value="+86"/>   <!-- 国家码选择 -->
+        </div>
+      </div>
+      <input id="normal-input" type="tel" class="yKcGN1NT X5L8kib_"
+             placeholder="请输入手机号"/>
+    </div>
+
+    <!-- 验证码输入 -->
+    <div id="douyin_login_comp_button_input_id" class="qnf7kdoT _Yqor1vk">
+      <div class="HAJXeM_Z">
+        <input id="button-input" type="tel" class="tnpNAdqe _Yqor1vk"
+               placeholder="请输入验证码"/>
+      </div>
+      <span class="gKXDWaPG KX2Mhb6E">获取验证码</span>
+    </div>
+
+    <!-- 登录按钮 -->
+    <div id="douyin_login_comp_btn_id"
+         class="r7j70rK2 M38h7w3V BBqC6Jfj zcAEoiw0">
+      登录
+    </div>
+
+    <!-- 协议文案 -->
+    <span class="U90uXfg6">登录即代表同意</span>
+    <a class="oJHycERU">用户协议</a>
+    <span class="f64a2kjb">和</span>
+    <a class="oJHycERU">隐私政策</a>
+  </div>
+</div>
+```
+
+---
+
+### 返回按钮（面板左上角 ←）
+
+```html
+<div class="z0jIqDbA GI579pxg">
+  <svg>…</svg>   <!-- 左箭头图标 -->
+</div>
+```
+
+无 `role`、无 `aria-label`，纯 div + SVG。
+
+---
+
+## 文案确认清单
+
+| 文案 | 是否存在 | 所在元素 |
+|------|---------|---------|
+| "扫码登录" | ✅ | `<span class="C6OZQwMA">` |
+| "验证码登录" | ✅ | `<span class="C6OZQwMA">` |
+| "密码登录" | ✅ | `<span>`（无特殊 class） |
+| "登录后即可搜索更多精彩视频" | ✅ | `<div class="mV5mWhEp">` |
+| "请输入手机号" | ✅ | `<input id="normal-input" placeholder="请输入手机号">` |
+| "请输入验证码" | ✅ | `<input id="button-input" placeholder="请输入验证码">` |
+| "获取验证码" | ✅ | `<span class="gKXDWaPG KX2Mhb6E">` |
+| "登录" | ✅ | `<div id="douyin_login_comp_btn_id">` |
+| "登录即代表同意 用户协议 和 隐私政策" | ✅ | `<span class="U90uXfg6">` + `<a>` 组合 |
+| "如何扫码" | ✅ | `<div class="zzs0DGQV">` |
+| "打开「抖音APP」点击左上角 扫一扫" | ✅ | `<p class="qNjfzEhh">` |
+
+---
+
+## 关于验证码浮层（#13 补充）
+
+当前未触发风控，DOM 中不存在任何含 `captcha` 或 `verify` 的 class/id。验证码组件是完全按需加载的——只有在触发滑块/拼图验证时才会注入 DOM。如需实测 `.vc-captcha-verify-visibility` 是否为真实 class，需要在高频操作（如快速刷新、批量请求）触发风控后才能观察到。

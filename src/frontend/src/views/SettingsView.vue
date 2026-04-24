@@ -1,19 +1,40 @@
 <template>
-  <n-space vertical>
+  <n-space vertical :size="16">
     <n-h4 style="margin: 0">系统设置</n-h4>
-    <n-card title="账号" size="small">
+
+    <n-card title="浏览器配置" size="small">
+      <n-form label-placement="left" label-width="120" style="max-width: 640px">
+        <n-form-item label="浏览器路径">
+          <n-input v-model:value="settings.browser_path" placeholder="留空使用 Playwright 内置浏览器；或填 chrome.exe 完整路径" />
+        </n-form-item>
+        <n-form-item label="CDP URL">
+          <n-input v-model:value="settings.cdp_url" placeholder="如 http://127.0.0.1:9222（接管已开启的 Chrome）" />
+        </n-form-item>
+        <n-form-item label="启用 CDP 接管">
+          <n-switch v-model:value="settings.cdp_enabled" />
+        </n-form-item>
+        <n-button type="primary" size="small" @click="saveSettings">保存</n-button>
+      </n-form>
+    </n-card>
+
+    <n-card title="登录状态" size="small">
       <n-space align="center">
         <n-tag :type="loginStatus?.logged_in ? 'success' : 'default'">
           {{ loginStatus?.logged_in ? '已登录' : '未登录' }}
         </n-tag>
         <span v-if="loginStatus?.username">{{ loginStatus.username }}</span>
+        <span v-if="loginStatus?.expires_at" style="color: #888; font-size: 12px;">
+          过期：{{ loginStatus.expires_at }}
+        </span>
         <n-button size="small" @click="openLogin">打开浏览器登录</n-button>
+        <n-button size="small" @click="loadLogin">刷新状态</n-button>
       </n-space>
     </n-card>
-    <n-card title="全局默认" size="small">
-      <n-form label-placement="left" label-width="120" style="max-width: 400px">
+
+    <n-card title="任务默认参数" size="small">
+      <n-form label-placement="left" label-width="140" style="max-width: 480px">
         <n-form-item label="发送间隔(秒)">
-          <n-input-number v-model:value="settings.send_interval" :min="10" style="width: 100%" />
+          <n-input-number v-model:value="settings.send_interval" :min="1" style="width: 100%" />
         </n-form-item>
         <n-form-item label="日上限">
           <n-input-number v-model:value="settings.daily_limit" :min="1" style="width: 100%" />
@@ -24,6 +45,7 @@
         <n-button type="primary" size="small" @click="saveSettings">保存</n-button>
       </n-form>
     </n-card>
+
     <n-card title="AI 配置（MVP 仅 UI）" size="small">
       <n-form label-placement="left" label-width="100" style="max-width: 480px">
         <n-form-item label="API Key">
@@ -37,27 +59,29 @@
         </n-form-item>
       </n-form>
     </n-card>
+
     <n-card title="关于" size="small">
-      <p>抖音助手 Douyin Reach v0.1.0</p>
+      <p>{{ appInfo.name }} v{{ appInfo.version }}</p>
       <p>按关键词检索视频 → 提取评论与用户 → 规则筛选 → 私信触达。</p>
+      <p style="color: #888; font-size: 12px;">
+        项目仓库：<a href="https://github.com/CamarilloG/douyin_ass" target="_blank" style="color: #63e2b7;">CamarilloG/douyin_ass</a>
+      </p>
     </n-card>
   </n-space>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { NCard, NSpace, NButton, NTag, NForm, NFormItem, NInput, NInputNumber, NH4 } from 'naive-ui'
+import { ref, reactive, onMounted } from 'vue'
+import { NCard, NSpace, NButton, NTag, NForm, NFormItem, NInput, NInputNumber, NSwitch, NH4, useMessage } from 'naive-ui'
 import { bridge, isApiAvailable } from '@/api/bridge'
 
+const message = useMessage()
 const loginStatus = ref<{ logged_in: boolean; username?: string | null; expires_at?: string | null } | null>(null)
-const settings = ref<{
-  send_interval: number
-  daily_limit: number
-  risk_warning_pause: number
-  ai_api_key: string
-  ai_endpoint: string
-  ai_model: string
-}>({
+const appInfo = ref<{ version: string; name: string }>({ version: '0.0.0', name: '抖音助手' })
+const settings = reactive({
+  browser_path: '',
+  cdp_url: '',
+  cdp_enabled: false,
   send_interval: 30,
   daily_limit: 100,
   risk_warning_pause: 600,
@@ -67,43 +91,62 @@ const settings = ref<{
 })
 
 async function loadLogin() {
-  if (!bridge) return
-  loginStatus.value = await bridge.check_login_status()
-}
-
-async function loadSettings() {
-  if (!bridge) return
-  const raw = await bridge.get_settings()
-  settings.value = {
-    send_interval: Number(raw.send_interval) || 30,
-    daily_limit: Number(raw.daily_limit) || 100,
-    risk_warning_pause: Number(raw.risk_warning_pause) || 600,
-    ai_api_key: String(raw.ai_api_key ?? ''),
-    ai_endpoint: String(raw.ai_endpoint ?? ''),
-    ai_model: String(raw.ai_model ?? ''),
+  try {
+    loginStatus.value = await bridge.check_login_status()
+  } catch (e) {
+    console.error(e)
   }
 }
 
-function openLogin() {
-  bridge?.open_login_browser()
+async function loadSettings() {
+  try {
+    const raw = await bridge.get_settings()
+    settings.browser_path = String(raw.browser_path ?? '')
+    settings.cdp_url = String(raw.cdp_url ?? '')
+    settings.cdp_enabled = Boolean(raw.cdp_enabled)
+    settings.send_interval = Number(raw.send_interval) || 30
+    settings.daily_limit = Number(raw.daily_limit) || 100
+    settings.risk_warning_pause = Number(raw.risk_warning_pause) || 600
+    settings.ai_api_key = String(raw.ai_api_key ?? '')
+    settings.ai_endpoint = String(raw.ai_endpoint ?? '')
+    settings.ai_model = String(raw.ai_model ?? '')
+  } catch (e) {
+    console.error(e); message.error('加载设置失败')
+  }
+}
+
+async function loadAppInfo() {
+  try {
+    appInfo.value = await bridge.get_app_version()
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+async function openLogin() {
+  try {
+    await bridge.open_login_browser()
+    message.success('浏览器已启动，请登录抖音')
+  } catch (e) {
+    console.error(e); message.error('启动浏览器失败')
+  }
 }
 
 async function saveSettings() {
-  if (!bridge) return
-  await bridge.update_settings({
-    send_interval: settings.value.send_interval,
-    daily_limit: settings.value.daily_limit,
-    risk_warning_pause: settings.value.risk_warning_pause,
-    ai_api_key: settings.value.ai_api_key,
-    ai_endpoint: settings.value.ai_endpoint,
-    ai_model: settings.value.ai_model,
-  })
+  try {
+    await bridge.update_settings({ ...settings })
+    message.success('设置已保存')
+  } catch (e) {
+    console.error(e); message.error('保存设置失败')
+  }
 }
 
-onMounted(() => {
-  if (isApiAvailable()) {
-    loadLogin()
-    loadSettings()
+onMounted(async () => {
+  const ok = await isApiAvailable()
+  if (ok) {
+    await Promise.all([loadLogin(), loadSettings(), loadAppInfo()])
+  } else {
+    message.error('无法连接到后端服务器')
   }
 })
 </script>

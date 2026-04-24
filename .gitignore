@@ -12,29 +12,46 @@ env/
 dist/
 build/
 
+# Node
+node_modules/
+.npm
+*.log
+
 # IDE
-.idea/
 .vscode/
+.idea/
 .cursor/
+.codex/
+.claude/
 *.swp
 *.swo
-node_modules/
 
-# OS
-.DS_Store
-Thumbs.db
+# 数据目录（含 Chrome 用户数据、数据库、登录态、settings 等，统一忽略）
+data/
 
-# Local / secrets
+# 日志
+logs/
+*.log
+
+# 测试 / 调试产物
+test_*.png
+test_*.html
+test_screenshots/
+debug_*.png
+archive/
+
+# 密钥与本地配置
 .env
 *.local
-*.db
 *.sqlite
 *.sqlite3
-data/
 cookies/
 cookies.json
 storage_state.json
 
-# Logs
-*.log
-logs/
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# Vite
+.vite/
