@@ -253,6 +253,57 @@ export const bridge = {
 
   get_app_version: () =>
     callSafe('get_app_version', { version: '0.0.0', name: '抖音助手' }),
+
+  // ==================== 商业授权 ====================
+
+  get_license_info: () =>
+    callSafe('get_license_info', {
+      valid: false,
+      reason_code: 'unavailable',
+      reason_message: '后端不可用',
+      fingerprint: '',
+    } as
+      | {
+          valid: true
+          licensee: string
+          license_id: string
+          fingerprint: string
+          issued_at: string
+          expires_at: string
+          days_left: number
+          expired: boolean
+        }
+      | {
+          valid: false
+          reason_code: string
+          reason_message: string
+          fingerprint: string
+        }),
+
+  activate_license: (token: string) =>
+    callSafe(
+      'activate_license',
+      { ok: false, error_code: 'unavailable', error_message: '后端不可用' } as
+        | { ok: true; info: any }
+        | { ok: false; error_code: string; error_message: string },
+      token,
+    ),
+
+  pick_license_file: () =>
+    callSafe(
+      'pick_license_file',
+      { ok: false, error: '后端不可用' } as
+        | { ok: true; content: string; path: string }
+        | { ok: false; error: string },
+    ),
+
+  deactivate_license: () =>
+    callSafe(
+      'deactivate_license',
+      { ok: false, error: '后端不可用' } as
+        | { ok: true }
+        | { ok: false; error: string },
+    ),
 }
 
 /**

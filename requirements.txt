@@ -11,6 +11,7 @@ playwright>=1.40
 
 # 工具库
 python-dotenv>=1.0.0
+cryptography>=42.0.0
 
 # 可选：桌面壳（如果需要 pywebview 模式）
 pywebview>=4.0

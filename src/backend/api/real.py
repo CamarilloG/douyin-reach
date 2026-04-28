@@ -74,10 +74,20 @@ class RealApi(Api):
     def __init__(self) -> None:
         db.init_schema()
         self._window = None  # pywebview 窗口，用于 evaluate_js 与 create_file_dialog
+        self._license_info = None  # main.py 启动校验通过后注入
+        self._license_error: tuple[str, str] | None = None  # 启动校验失败时的 (code, message)
 
     def set_window(self, window) -> None:
         """M6：注入 pywebview 窗口，供事件推送与保存对话框使用。"""
         self._window = window
+
+    def set_license(self, info, error: tuple[str, str] | None = None) -> None:
+        """main.py 启动校验后注入：
+        - 通过 → info=LicenseInfo, error=None
+        - 失败 → info=None, error=(code, message)
+        """
+        self._license_info = info
+        self._license_error = error
 
     def _push_event(self, event_type: str, data: dict) -> None:
         """向前端推送 CustomEvent，用于实时进度等。"""
@@ -655,3 +665,116 @@ class RealApi(Api):
     def get_app_version(self) -> dict[str, Any]:
         from src.backend.version import VERSION, APP_NAME
         return {"version": VERSION, "name": APP_NAME}
+
+    # ---------- 商业授权 ----------
+    def get_license_info(self) -> dict[str, Any]:
+        """返回当前授权状态。
+        - valid=True → 含完整 license 详情
+        - valid=False → reason_code/reason_message 标识失败原因，前端据此显示激活蒙版
+        无论哪种状态都包含 fingerprint，便于客户复制后回传给签发方。
+        """
+        from src.backend.license import get_machine_fingerprint
+
+        fingerprint = get_machine_fingerprint()
+
+        info = self._license_info
+        if info is None:
+            code, msg = self._license_error or ("missing", "未找到激活文件，请使用激活码完成首次激活。")
+            return {
+                "valid": False,
+                "reason_code": code,
+                "reason_message": msg,
+                "fingerprint": fingerprint,
+            }
+
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        seconds_left = (info.expires_at - now).total_seconds()
+        days_left = max(0, int(seconds_left // 86400))
+        expired = seconds_left <= 0
+        return {
+            "valid": True,
+            "licensee": info.licensee,
+            "license_id": info.license_id,
+            "fingerprint": fingerprint,
+            "issued_at": info.issued_at.isoformat().replace("+00:00", "Z"),
+            "expires_at": info.expires_at.isoformat().replace("+00:00", "Z"),
+            "days_left": days_left,
+            "expired": expired,
+        }
+
+    def activate_license(self, token: str) -> dict[str, Any]:
+        """前端激活蒙版调用：粘贴激活码 / 文件内容 → 校验 → 写入 data/license.key。
+        token 接受三种输入：
+          1. 完整 license.key 文件 JSON（"{\"data\":...}"）
+          2. base64 编码的 JSON 一行激活码
+          3. 上述任一形式带空白/换行（容错）
+        返回 {ok, error, info} —— ok=True 时 info 含 LicenseInfo 字段。
+        """
+        from src.backend.license import LicenseError, activate_and_persist
+        from src.backend.utils.paths import get_data_root
+
+        try:
+            info = activate_and_persist(token, get_data_root())
+        except LicenseError as e:
+            return {"ok": False, "error_code": e.code, "error_message": e.message}
+        # 注入到当前进程，前端无需重启即可看到生效
+        self._license_info = info
+        self._license_error = None
+        return {
+            "ok": True,
+            "info": self.get_license_info(),
+        }
+
+    def deactivate_license(self) -> dict[str, Any]:
+        """退出当前授权：删除 data/license.key + data/.license_state，重置内存状态。
+        前端调用后应 reload 页面或重新查询 get_license_info，让激活蒙版重新出现。
+        返回 {ok, error}。
+        """
+        from src.backend.utils.paths import get_data_path
+
+        license_path = get_data_path("license.key")
+        state_path = get_data_path(".license_state")
+        errors = []
+        for p in (license_path, state_path):
+            try:
+                if os.path.isfile(p):
+                    os.remove(p)
+            except OSError as e:
+                errors.append(f"{p}: {e}")
+
+        # 不论文件清理是否完全成功，内存里的授权状态都重置（双保险）
+        self._license_info = None
+        self._license_error = ("missing", "已退出授权，请重新激活后继续使用。")
+
+        if errors:
+            return {"ok": False, "error": "; ".join(errors)}
+        return {"ok": True}
+
+    def pick_license_file(self) -> dict[str, Any]:
+        """打开原生文件选择对话框，返回选中文件的内容字符串。
+        前端的"选择文件"按钮调用此方法后，把返回的 content 直接传给 activate_license。
+        返回 {ok, content, error} —— ok=False 时表示用户取消或读取失败。
+        """
+        if not self._window:
+            return {"ok": False, "error": "窗口未就绪"}
+        try:
+            import webview
+
+            paths = self._window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                allow_multiple=False,
+                file_types=("授权文件 (*.key;*.json;*.txt)", "All files (*.*)"),
+            )
+        except Exception as e:
+            return {"ok": False, "error": f"打开对话框失败：{e}"}
+        if not paths:
+            return {"ok": False, "error": "已取消"}
+        path = paths[0] if isinstance(paths, (list, tuple)) else paths
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except OSError as e:
+            return {"ok": False, "error": f"读取文件失败：{e}"}
+        return {"ok": True, "content": content, "path": path}

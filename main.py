@@ -1,15 +1,22 @@
-"""
-抖音助手（Douyin Reach）桌面入口。
+"""抖音助手（Douyin Reach）桌面入口。
 启动 pywebview 窗口并加载 Vue 前端；暴露 Api 给前端通过 JS-Python bridge 调用。
 
 支持两种运行模式:
 - 开发模式: python main.py    → 加载 src/frontend/dist 或 vite dev server
 - 冻结模式: 双击 exe          → 从 _MEIPASS/frontend_dist 加载,数据写入 exe 同目录 ./data/
+
+启动期防御策略（fail-closed + 友好提示）:
+1. 顶层 main() 用 try/except 包住整个启动序列。任何未预料异常 → 弹原生 MessageBox 后退出，
+   避免客户看到黑窗一闪而过。
+2. license 校验段单独捕获非 LicenseError 异常（如 cryptography 内部错误、winreg 异常等），
+   转换为 internal_error 注入到激活蒙版而不是让进程崩溃。
+3. 即便授权模块整体异常，软件也会"启动到激活蒙版状态"，主功能保持不可用（fail-closed）。
 """
 from __future__ import annotations
 
 import os
 import sys
+import traceback
 
 # 保证从项目根目录运行时可导入 src.backend(冻结模式下 PyInstaller 已自动处理 sys.path)
 _ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -17,7 +24,41 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 
+def _show_fatal_and_exit(message: str, details: str = "") -> None:
+    """启动期不可恢复错误：弹 Windows MessageBox（带详细信息）后退出。
+    设置 DOUYIN_REACH_NO_DIALOG=1 时跳过弹框（CI / headless / 仿真）。
+    """
+    title = "抖音助手 启动失败"
+    body = message
+    if details:
+        body += "\n\n--- 详细信息（可截图发给软件提供方） ---\n" + details
+    print(f"[FATAL] {body}", file=sys.stderr)
+    if os.getenv("DOUYIN_REACH_NO_DIALOG", "").lower() not in ("1", "true", "yes"):
+        try:
+            import ctypes  # type: ignore[import-not-found]
+
+            # MB_OK | MB_ICONERROR | MB_SYSTEMMODAL = 0x10 | 0x1000
+            ctypes.windll.user32.MessageBoxW(0, body, title, 0x10 | 0x1000)
+        except Exception:
+            pass
+    sys.exit(1)
+
+
 def main() -> None:
+    """顶层入口：包住整个启动序列，任何未捕获异常 → 友好弹窗。"""
+    try:
+        _main_inner()
+    except SystemExit:
+        raise
+    except BaseException as e:  # 包括 KeyboardInterrupt 等罕见路径
+        _show_fatal_and_exit(
+            f"软件启动遇到意外错误：\n{type(e).__name__}: {e}",
+            details=traceback.format_exc(),
+        )
+
+
+def _main_inner() -> None:
+    # 关键依赖按顺序导入；任一失败由 main() 兜底转成友好弹窗
     import webview
 
     from src.backend.utils.paths import (
@@ -28,11 +69,55 @@ def main() -> None:
     from src.backend.api.real import RealApi
     from src.backend.version import VERSION, APP_NAME
 
-    # 启动时确保数据目录存在(冻结模式 = exe 同目录/data)
+    # license 模块单独导入并兜底：缺 cryptography / 模块结构错位等场景，
+    # 不应让进程崩溃，而是降级为"未激活 + 内部错误提示"，让蒙版告诉客户该联系谁。
+    try:
+        from src.backend.license import LicenseError, verify_license_or_die
+    except Exception as e:
+        LicenseError = None  # type: ignore[assignment]
+        verify_license_or_die = None  # type: ignore[assignment]
+        license_import_error = (
+            "internal_error",
+            "授权模块加载失败（运行环境异常），请联系软件提供方：\n"
+            f"{type(e).__name__}: {e}",
+        )
+    else:
+        license_import_error = None
+
     data_root = ensure_data_dirs()
     print(f"[启动] {APP_NAME} v{VERSION} | 数据目录: {data_root}")
 
+    # 商业版授权校验：通过 → 注入 LicenseInfo；失败 → 注入失败原因供激活蒙版处理。
+    license_info = None
+    license_error: tuple[str, str] | None = None
+
+    if license_import_error is not None:
+        license_error = license_import_error
+        print(f"[License] IMPORT FAIL: {license_import_error[1]}")
+    else:
+        try:
+            license_info = verify_license_or_die(data_root)
+            print(
+                f"[License] OK | licensee={license_info.licensee} | "
+                f"expires_at={license_info.expires_at.isoformat()}"
+            )
+        except LicenseError as e:  # type: ignore[misc]
+            license_error = (e.code, e.message)
+            print(f"[License] FAIL ({e.code}): {e.message}")
+        except Exception as e:
+            # cryptography 内部错误 / IO 异常 / winreg 异常等。fail-closed：
+            # 不冒泡导致进程崩溃，转成 internal_error 让蒙版兜住。
+            tb = traceback.format_exc()
+            license_error = (
+                "internal_error",
+                "授权校验过程发生内部错误，请联系软件提供方：\n"
+                f"{type(e).__name__}: {e}",
+            )
+            print(f"[License] INTERNAL ERROR:\n{tb}", file=sys.stderr)
+
     api = RealApi()
+    if hasattr(api, "set_license"):
+        api.set_license(license_info, license_error)
 
     use_dev = os.getenv("DOUYIN_REACH_DEV", "").lower() in ("1", "true", "yes")
     dist_path = get_frontend_dist_path()
