@@ -37,21 +37,33 @@ playwright_datas = [
 # webview 需要把它的 JS 注入脚本一起带上
 webview_datas = collect_data_files('webview')
 
+# cryptography 含 Rust 编译的 _rust 子模块（动态加载），PyInstaller 经常漏收录。
+# 显式 collect_all 兜底，避免单文件 exe "开发能跑、打包就崩" 的常见陷阱。
+# 这是商业版授权校验的强依赖：缺了就连 fail-closed 都没法做。
+crypto_datas, crypto_binaries, crypto_hiddenimports = collect_all('cryptography')
+
 a = Analysis(
     ['main.py'],
     pathex=['.'],
-    binaries=playwright_binaries,
+    binaries=playwright_binaries + crypto_binaries,
     datas=[
         # 前端构建产物 → _MEIPASS/frontend_dist/
         ('src/frontend/dist', 'frontend_dist'),
         # 应用图标 → _MEIPASS/5oj5n-gaprv-001.ico (供 pywebview 运行时加载)
         ('5oj5n-gaprv-001.ico', '.'),
-    ] + playwright_datas + webview_datas,
+    ] + playwright_datas + webview_datas + crypto_datas,
     hiddenimports=[
         'webview.platforms.winforms',
         'clr_loader',
         'pythonnet',
-    ] + playwright_hiddenimports,
+        # 商业版授权模块（虽然 PyInstaller 跟随 main.py 的 import 能找到，
+        # 但显式列出避免未来重构时静默丢失）
+        'src.backend.license',
+        'src.backend.license.fingerprint',
+        'src.backend.license.keys',
+        'src.backend.license.state',
+        'src.backend.license.verifier',
+    ] + playwright_hiddenimports + crypto_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

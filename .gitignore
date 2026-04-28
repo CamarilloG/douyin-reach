@@ -49,6 +49,12 @@ cookies/
 cookies.json
 storage_state.json
 
+# 商业版授权 - 永远不要入仓库
+license.key
+*.license.key
+license_signing_*.pem
+*.license_state
+
 # 系统文件
 .DS_Store
 Thumbs.db
