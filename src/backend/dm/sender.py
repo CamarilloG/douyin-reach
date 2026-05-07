@@ -584,42 +584,118 @@ class DMSender:
 
     async def _detect_send_result(self, page: Any, sent_message: str) -> SendResult:
         """
-        检测发送结果：优先看成功标志，再看失败文案。
+        检测发送结果：toast 红字 → 浮窗内失败文案 → 浮窗内 needle 命中。
 
         关键事实：
         - 「只能发送一条消息」是静态提示，不是失败标志。
-        - 真正的失败会出现「发送失败」红字 toast。
-        - 成功判定：IM 对话区出现我们刚发送的文本前缀。
-        - 使用 page.evaluate 替代 page.content()，仅扫描 IM 容器内文本，
-          避免序列化整个 DOM（数百 KB/次）。轮询间隔 300ms（总预算 ~4.5s）。
+        - 真正的失败信号有两类：
+          1) Semi Design 红字 toast (`.semi-toast-error` 等)
+          2) 浮窗内文案命中 DM_FAIL_PHRASES 任一短语
+             （"操作太频繁/对方设置/已达上限/已被拉黑/陌生人消息已禁用/网络异常..."）
+        - 成功判定：浮窗本体（im-dialog 或 msg-input）的 innerText 含 needle 前缀。
+          之前用 [data-e2e="im-entry"] 顶栏容器或 body fallback，body 太宽，
+          可能误命中评论区/footer 同字。
+
+        失败 retryable=True：技术失败 / 限速可重试。
+        失败 retryable=False：业务约束（拒收/拉黑/禁用）短期内重试无意义，跳过。
         """
         needle = (sent_message or "").strip()
         needle_prefix = needle[:10] if len(needle) >= 10 else needle
 
+        # 失败短语分类：哪些是"业务限制不重试"，哪些是"技术失败可重试"
+        BUSINESS_PHRASES = {
+            "对方设置了", "对方设置不接收", "对方拒绝接收",
+            "无法向其发送", "陌生人消息已禁用", "已被对方拉黑", "已禁言",
+        }
+
         _JS_DETECT = """(args) => {
-            const [needle, prefix] = args;
-            const c = document.querySelector('[data-e2e="im-entry"]') || document.body;
-            const t = c.innerText || '';
-            if (needle && (t.includes(needle) || (prefix && t.includes(prefix)))) return 'success';
-            if (t.includes('发送失败')) return 'fail';
-            return 'pending';
+            const [needle, prefix, failPhrases, toastSelectors] = args;
+            const out = { result: 'pending', reason: null, hit: null };
+
+            // 1) Toast 红字（最强信号，portal 通常在 body 末尾）
+            for (const sel of toastSelectors) {
+                const t = document.querySelector(sel);
+                if (!t) continue;
+                const r = t.getBoundingClientRect();
+                if (r.width <= 0 || r.height <= 0) continue;
+                const txt = (t.textContent || '').trim();
+                if (txt) {
+                    out.result = 'fail';
+                    out.reason = 'toast';
+                    out.hit = sel + ': ' + txt.slice(0, 80);
+                    return out;
+                }
+            }
+
+            // 2) 浮窗本体（不是 im-entry 顶栏，是 im-dialog / msg-input 浮窗内）
+            const dialog = document.querySelector('[data-e2e="im-dialog"]');
+            const msgInput = document.querySelector('[data-e2e="msg-input"]');
+            const popup = dialog || msgInput;
+            if (!popup) return out;  // 浮窗都消失了 → pending（继续等）
+            const popupText = popup.innerText || '';
+
+            // 失败短语扫描
+            for (const phrase of failPhrases) {
+                if (!phrase) continue;
+                if (popupText.includes(phrase)) {
+                    out.result = 'fail';
+                    out.reason = 'phrase';
+                    out.hit = phrase;
+                    return out;
+                }
+            }
+
+            // 3) 成功判定：浮窗内出现刚发送的文本（前缀也算）
+            if (needle && (popupText.includes(needle) || (prefix && popupText.includes(prefix)))) {
+                out.result = 'success';
+                return out;
+            }
+            return out;
         }"""
 
+        last_pending_reason: Optional[str] = None
         for _ in range(15):  # 15 × 0.3s ≈ 4.5s
             await asyncio.sleep(0.3)
             try:
-                result = await page.evaluate(_JS_DETECT, [needle, needle_prefix])
-                if result == "success":
+                r = await page.evaluate(
+                    _JS_DETECT,
+                    [
+                        needle,
+                        needle_prefix,
+                        list(sel.DM_FAIL_PHRASES),
+                        list(sel.DM_TOAST_ERROR_SELECTORS),
+                    ],
+                )
+                if not isinstance(r, dict):
+                    continue
+                state = r.get("result")
+                if state == "success":
                     return SendResult(success=True, failure_type=None, failure_reason=None, retryable=False)
-                if result == "fail":
+                if state == "fail":
+                    reason_kind = r.get("reason") or "?"
+                    hit = r.get("hit") or "?"
+                    # 业务短语命中 → 不可重试（节省外层 retry 时间）
+                    is_business = (
+                        reason_kind == "phrase"
+                        and any(b in hit for b in BUSINESS_PHRASES)
+                    )
+                    logger.warning(
+                        "[主站] 发送失败信号 | 类型=%s | 命中=%s | retryable=%s",
+                        reason_kind, hit, not is_business,
+                    )
                     return SendResult(
                         success=False,
-                        failure_type="technical",
-                        failure_reason="发送失败",
-                        retryable=True,
+                        failure_type="business" if is_business else "technical",
+                        failure_reason=f"{reason_kind}: {hit}",
+                        retryable=not is_business,
                     )
+                last_pending_reason = "no-popup" if r.get("reason") is None else r.get("reason")
             except Exception:
                 pass
+        logger.warning(
+            "[主站] 发送结果检测超时 4.5s | 最后状态=%s | needle_prefix=%r",
+            last_pending_reason, needle_prefix,
+        )
         return SendResult(
             success=False,
             failure_type="technical",
