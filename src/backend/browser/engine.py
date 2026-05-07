@@ -172,7 +172,10 @@ class BrowserEngine:
             logger.info("已连接到现有浏览器实例")
             return True
         except Exception as e:
-            logger.warning("连接 CDP 失败: %s", e)
+            # 设计上的两级降级:CDP 连不上是常态(95% 用户没预启动 --remote-debugging-port Chrome),
+            # 调用方 launch() 会自动 fallback 到 _launch_system_browser_via_cdp 启动新浏览器。
+            # 用 info 而不是 warning,避免在客户日志里制造"出错了"的误导。
+            logger.info("现有 Chrome (CDP %s) 不可达,将启动新浏览器:%s", self._cdp_url, e)
             return False
 
     async def _attach_connected_browser(self) -> None:
@@ -891,27 +894,57 @@ class BrowserEngine:
             logger.debug("滚动评论容器失败: %s", e)
             return "has_more"
 
-    # JS:一次性把所有评论项的 sec_uid/nickname/text 提取出来,可选 offset 增量
+    # JS:一次性把所有评论项的 sec_uid/nickname/text 提取出来,可选 offset 增量。
+    # 提取策略(2026-04, 纯 DOM 无关键词):
+    # 抖音评论项内部布局固定为两列:
+    #   - item.children[0] = 头像列 (.comment-item-avatar)
+    #   - item.children[1] = 右列容器, 其 firstElementChild 包含 4 个固定顺序的兄弟 div:
+    #       [0] 头部信息行(昵称 + "..." 菜单)
+    #       [1] 评论正文容器
+    #       [2] 时间·属地行
+    #       [3] 统计栏(点赞 / 分享 / 回复)
+    # 评论正文容器 [1] 同级可能有 .semi-tag (如"作者回复过"徽章) — 通过取
+    # 容器的 firstElementChild 可天然跳过, 不需要中文文案过滤。
+    # @mention 链接是正文容器的 <a> 子节点, textContent 自然包含, 不会被剥掉。
+    # 兜底: 任一 DOM 路径取不到时返回空字符串而非抛错, 该条评论会在 Python 侧被过滤。
     _COMMENTS_EXTRACT_JS = """
         (offset) => {
             const items = document.querySelectorAll('div[data-e2e="comment-item"]');
             const out = [];
             const start = Math.max(0, offset || 0);
+
+            const extractOne = (item) => {
+                const r = { nickname: '', sec_uid: '', text: '' };
+                if (!item) return r;
+                try {
+                    // 昵称 + sec_uid: 头部信息行内的 /user/ 链接(class 名 comment-item-info-wrap 是语义类, 非 webpack hash)
+                    const infoWrap = item.querySelector('[class*="comment-item-info-wrap"]');
+                    const userLink = infoWrap && infoWrap.querySelector('a[href*="/user/"]');
+                    if (userLink) {
+                        r.nickname = (userLink.textContent || '').trim();
+                        const m = (userLink.getAttribute('href') || '').match(/\\/user\\/([^/?#]+)/);
+                        if (m) r.sec_uid = m[1];
+                    }
+
+                    // 评论正文: 右列 → 第一个子 div → children[1] → firstElementChild
+                    const rightCol = item.children[1];
+                    const wrapper = rightCol && rightCol.firstElementChild;
+                    const kids = (wrapper && wrapper.children) || [];
+                    const textBox = kids[1];
+                    if (textBox) {
+                        // 取 firstElementChild 而不是整个容器, 避免把同级的 .semi-tag 徽章混入
+                        const realText = textBox.firstElementChild || textBox;
+                        r.text = (realText.textContent || '').trim();
+                    }
+                } catch (e) { /* 静默, 由调用方按空字段过滤 */ }
+                return r;
+            };
+
             for (let i = start; i < items.length; i++) {
-                const item = items[i];
-                const link = item.querySelector('a[href*="/user/"]');
-                if (!link) continue;
-                const href = link.getAttribute('href') || '';
-                const m = href.match(/\\/user\\/([A-Za-z0-9_-]+)/);
-                if (!m) continue;
-                const sec_uid = m[1];
-                const nickname = (link.textContent || '').replace('@', '').trim();
-                if (!nickname) continue;
-                let text = (item.textContent || '').trim();
-                if (text.indexOf(nickname) === 0) text = text.slice(nickname.length);
-                text = text.replace(/^[\\s：:·,，]+/, '').replace(/\\s+/g, ' ').trim();
-                if (!text || text === nickname || text.length > 500) continue;
-                out.push({ sec_uid: sec_uid, nickname: nickname, text: text });
+                const r = extractOne(items[i]);
+                if (!r.sec_uid || !r.nickname || !r.text) continue;
+                if (r.text === r.nickname || r.text.length > 500) continue;
+                out.push(r);
             }
             return { total: items.length, items: out };
         }
@@ -940,6 +973,8 @@ class BrowserEngine:
         stale_rounds = 0
         scroll_attempts = 0
         max_scrolls = 40  # 配合单 evaluate 抓取,40 轮足够覆盖 ~500 条
+        # canary: 检测到大量 comment-item 但提取为空(selector drift)时只打一次 warn
+        drift_warned = False
 
         while len(comments) < max_count and scroll_attempts < max_scrolls:
             # 节流: 每 5 轮做一次危险文案检查; 入口已经做过一次
@@ -959,6 +994,30 @@ class BrowserEngine:
 
             new_items = result.get("items", []) if isinstance(result, dict) else []
             total_items = int(result.get("total", processed_items)) if isinstance(result, dict) else processed_items
+
+            # canary: DOM 上有 ≥5 条评论但累计还没采到一条 → selector 极可能已失效。
+            # 只 warn 一次,继续跑(后续滚动可能恢复); 抓页面 HTML 留证便于排查。
+            if (
+                not drift_warned
+                and total_items >= 5
+                and len(comments) == 0
+                and not new_items
+            ):
+                drift_warned = True
+                logger.warning(
+                    "评论提取异常:DOM 上有 %d 条 comment-item, 但解析出 0 条有效评论。"
+                    "selector 可能已失效,需要重新对照真实 DOM 调整 _COMMENTS_EXTRACT_JS。",
+                    total_items,
+                )
+                try:
+                    snapshot_path = get_data_path("debug_comment_dom_drift.html")
+                    snapshot_html = await self._page.content()
+                    with open(snapshot_path, "w", encoding="utf-8") as f:
+                        f.write(snapshot_html)
+                    logger.warning("已抓取页面 HTML 留证: %s", snapshot_path)
+                except Exception as snap_err:
+                    logger.debug("抓取 drift 快照失败: %s", snap_err)
+
             processed_items = total_items
 
             for row in new_items:
