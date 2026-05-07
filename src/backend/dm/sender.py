@@ -91,16 +91,21 @@ class DMSender:
                 )
 
             # ========== 合并检测：新手引导 + 风控 + 私信按钮，单次 evaluate ==========
-            # 将原来的 dismiss_newbie_guide() (~3 CDP)、check_page_danger() (~7 CDP)、
-            # 按钮查找 evaluate 合并为 1 次 CDP 往返，消除 5-10s 延迟。
+            # 按钮查找逻辑跟创作者通道 sender_creator._light_touch_main 对齐(2026-05 调研后修正):
+            #   - 文本从 span.semi-button-content 精确取(Semi 设计系统类,稳定)
+            #   - 黑名单 [data-e2e="im-entry"]: 顶栏的"私信"包装,click 后跳全局消息中心,不弹浮窗
+            #   - 黑名单 [data-e2e="im-dialog"]: 浮窗内可能也有自引用的"私信"按钮
+            #   - 可见性用 computed style 判,不用 offsetParent(fixed 定位会被误杀)
+            #   - 诊断候选: 失败时附带所有命中"私信"文本的 button(含不可见+黑名单)+容器路径
             t_btn0 = time.monotonic()
             combined = await page.evaluate("""(args) => {
-                const [dangerTexts, captchaSelectors, newbieText] = args;
+                const [dangerTexts, captchaSelectors, newbieText, userDetailSel] = args;
                 const result = {
                     newbieFound: false,
                     dangerText: null,
                     captchaSelector: null,
                     dmButtons: [],
+                    diagCandidates: [],
                     pageSnippet: ''
                 };
 
@@ -155,17 +160,57 @@ class DMSender:
                     }
                 }
 
-                // 4. 私信按钮查找
-                const btns = document.querySelectorAll('button, [role="button"]');
-                for (let i = 0; i < btns.length; i++) {
-                    const btn = btns[i];
-                    const text = (btn.textContent || '').trim();
+                // 4. 私信按钮查找(对齐创作者通道写法)
+                const allDocBtns = Array.from(document.querySelectorAll('button'));
+                const detailEl = document.querySelector(userDetailSel);
+
+                const extractText = (btn) => {
+                    // 优先 Semi 的 span.semi-button-content,文本干净;fallback btn.textContent
+                    const span = btn.querySelector('span[class*="semi-button-content"]');
+                    if (span) return (span.textContent || '').trim();
+                    return (btn.textContent || '').trim();
+                };
+
+                const describeContainer = (btn) => {
+                    const anchors = [
+                        '[data-e2e="user-detail"]', '[data-e2e="user-info"]',
+                        '[data-e2e="im-entry"]', '[data-e2e="im-dialog"]'
+                    ];
+                    for (const a of anchors) {
+                        if (btn.closest(a)) return a;
+                    }
+                    return '(other)';
+                };
+
+                for (const btn of allDocBtns) {
+                    const text = extractText(btn);
                     if (text !== '私信') continue;
+                    // 黑名单: 顶部导航 / 浮窗自引用 (click 后跳消息中心或冒泡到自身,绝不会弹浮窗)
+                    if (btn.closest('[data-e2e="im-entry"]')) continue;
+                    if (btn.closest('[data-e2e="im-dialog"]')) continue;
+
                     const rect = btn.getBoundingClientRect();
-                    if (rect.width <= 0 || rect.height <= 0) continue;
-                    if (btn.offsetParent === null) continue;
-                    const inDetail = !!btn.closest('[data-e2e="user-detail"]');
-                    result.dmButtons.push({ index: i, priority: inDetail ? 0 : 1, y: rect.y });
+                    const style = window.getComputedStyle(btn);
+                    const visible = rect.width > 0 && rect.height > 0
+                        && style.display !== 'none' && style.visibility !== 'hidden';
+                    const inDetail = detailEl ? detailEl.contains(btn) : false;
+                    const globalIndex = allDocBtns.indexOf(btn);
+
+                    result.diagCandidates.push({
+                        index: globalIndex,
+                        visible, inDetail,
+                        w: Math.round(rect.width),
+                        h: Math.round(rect.height),
+                        container: describeContainer(btn)
+                    });
+
+                    if (!visible) continue;
+                    result.dmButtons.push({
+                        index: globalIndex,
+                        y: rect.y,
+                        inDetail,
+                        priority: inDetail ? 0 : 1
+                    });
                 }
 
                 // 5. 无按钮时取页面摘要（用于诊断）
@@ -178,12 +223,14 @@ class DMSender:
                 list(sel.DANGER_PAGE_TEXTS),
                 list(sel.CAPTCHA_DOM_SELECTORS),
                 sel.NEWBIE_GUIDE_DISMISS_TEXT,
+                sel.USER_DETAIL_CONTAINER,
             ])
-            logger.info("[计时] 合并检测 %.1fs | 新手引导=%s 风控=%s 验证码=%s 按钮数=%d",
+            logger.info("[计时] 合并检测 %.1fs | 新手引导=%s 风控=%s 验证码=%s 候选=%d 可见可选=%d",
                         time.monotonic() - t_btn0,
                         combined.get("newbieFound"),
                         combined.get("dangerText"),
                         combined.get("captchaSelector"),
+                        len(combined.get("diagCandidates", [])),
                         len(combined.get("dmButtons", [])))
 
             # 处理风控检测结果
@@ -255,9 +302,10 @@ class DMSender:
 
             t_click = time.monotonic()  # 给后续 [计时] 日志一个合理基准
 
-            # ---------- 兜底: DOM click (原逻辑) ----------
+            # ---------- 兜底: DOM click (对齐创作者通道写法) ----------
             if not opened:
                 candidates_raw = combined.get("dmButtons", [])
+                diag_first = combined.get("diagCandidates", [])
 
                 # 按钮未找到时，可能是页面尚未渲染完成（SPA 异步加载），轮询重试最多 3s
                 if not candidates_raw:
@@ -271,28 +319,48 @@ class DMSender:
                             failure_reason="用户页面不可访问（不存在或隐私账号）",
                             retryable=False,
                         )
-                    # 页面可能还在渲染，轮询等待私信按钮出现
-                    _JS_FIND_DM_BTNS = """() => {
-                        const results = [];
-                        const btns = document.querySelectorAll('button, [role="button"]');
-                        for (let i = 0; i < btns.length; i++) {
-                            const btn = btns[i];
-                            const text = (btn.textContent || '').trim();
+                    # 页面可能还在渲染，轮询等待私信按钮出现 (作用域和文本提取与首次一致)
+                    _JS_FIND_DM_BTNS = """(userDetailSel) => {
+                        const out = { buttons: [], diag: [] };
+                        const allDocBtns = Array.from(document.querySelectorAll('button'));
+                        const detailEl = document.querySelector(userDetailSel);
+                        for (const btn of allDocBtns) {
+                            const span = btn.querySelector('span[class*="semi-button-content"]');
+                            const text = ((span ? span.textContent : btn.textContent) || '').trim();
                             if (text !== '私信') continue;
+                            if (btn.closest('[data-e2e="im-entry"]')) continue;
+                            if (btn.closest('[data-e2e="im-dialog"]')) continue;
                             const rect = btn.getBoundingClientRect();
-                            if (rect.width <= 0 || rect.height <= 0) continue;
-                            if (btn.offsetParent === null) continue;
-                            const inDetail = !!btn.closest('[data-e2e="user-detail"]');
-                            results.push({ index: i, priority: inDetail ? 0 : 1, y: rect.y });
+                            const style = window.getComputedStyle(btn);
+                            const visible = rect.width > 0 && rect.height > 0
+                                && style.display !== 'none' && style.visibility !== 'hidden';
+                            const inDetail = detailEl ? detailEl.contains(btn) : false;
+                            const globalIndex = allDocBtns.indexOf(btn);
+                            out.diag.push({
+                                index: globalIndex, visible, inDetail,
+                                w: Math.round(rect.width), h: Math.round(rect.height)
+                            });
+                            if (!visible) continue;
+                            out.buttons.push({
+                                index: globalIndex, y: rect.y,
+                                inDetail, priority: inDetail ? 0 : 1
+                            });
                         }
-                        return results;
+                        return out;
                     }"""
+                    last_diag = diag_first
                     for _retry in range(6):  # 6 × 0.5s = 3s
                         await asyncio.sleep(0.5)
-                        candidates_raw = await page.evaluate(_JS_FIND_DM_BTNS)
+                        try:
+                            r = await page.evaluate(_JS_FIND_DM_BTNS, sel.USER_DETAIL_CONTAINER)
+                            candidates_raw = r.get("buttons", []) if isinstance(r, dict) else []
+                            last_diag = r.get("diag", []) if isinstance(r, dict) else []
+                        except Exception:
+                            candidates_raw = []
                         if candidates_raw:
                             logger.info("[计时] 按钮重试 %d 次后找到 | 额外等待 %.1fs", _retry + 1, (_retry + 1) * 0.5)
                             break
+                    diag_first = last_diag
 
                 if not candidates_raw:
                     page_text = ""
@@ -300,30 +368,43 @@ class DMSender:
                         page_text = await page.evaluate("() => (document.body.innerText || '').slice(0, 500)")
                     except Exception:
                         pass
-                    reason = "未找到可见的私信按钮"
                     if "用户不存在" in page_text or "该页面" in page_text or "无法访问" in page_text:
-                        reason = "用户页面不可访问（不存在或隐私账号）"
                         logger.warning("无私信按钮(用户不可达) | URL=%s | 页面摘要: %s", current_url, page_text[:100])
                         return SendResult(
                             success=False,
                             failure_type="business",
-                            failure_reason=reason,
+                            failure_reason="用户页面不可访问（不存在或隐私账号）",
                             retryable=False,
                         )
-                    logger.warning("无私信按钮(重试后仍未找到) | URL=%s | 页面摘要: %s", current_url, page_text[:100])
+                    # 诊断候选(让你能看清是"完全没找到带'私信'文字的 button"还是"找到了但被黑名单/不可见过滤")
+                    diag_summary = [
+                        f"idx={d.get('index')} visible={d.get('visible')} inDetail={d.get('inDetail')} "
+                        f"size={d.get('w')}x{d.get('h')} container={d.get('container', '?')}"
+                        for d in (diag_first or [])
+                    ]
+                    logger.warning(
+                        "[主站] 私信按钮未找到 | URL=%s | 候选(%d)=%s | 页面摘要: %s",
+                        current_url, len(diag_first or []),
+                        " ; ".join(diag_summary) if diag_summary else "空",
+                        page_text[:200],
+                    )
                     return SendResult(
                         success=False,
                         failure_type="technical",
-                        failure_reason=reason,
+                        failure_reason="未找到可见的私信按钮",
                         retryable=True,
                     )
 
                 # 排序：先按 priority（user-detail 内优先），再按 y 坐标大
                 candidates_raw.sort(key=lambda c: (c["priority"], -c.get("y", 0)))
                 chosen = candidates_raw[0]
-                dm_btn = page.locator('button, [role="button"]').nth(chosen["index"])
-                logger.info("选中私信按钮: priority=%d, y=%.0f, 候选详情=%s",
-                            chosen["priority"], chosen.get("y", 0), candidates_raw)
+                # ⚠️ 关键 bug fix: chosen.index 来自 Array.from(querySelectorAll('button')),
+                # 旧代码用 page.locator('button, [role="button"]').nth(idx) 索引集合不一致,
+                # 会点到错的 role="button" 元素 (如顶栏 div), click 后无浮窗弹出。
+                dm_btn = page.locator("button").nth(chosen["index"])
+                logger.info("[主站] 私信按钮选中 | index=%d y=%.0f inDetail=%s 候选数=%d",
+                            chosen["index"], chosen.get("y", 0), chosen.get("inDetail"),
+                            len(candidates_raw))
 
                 try:
                     await dm_btn.scroll_into_view_if_needed(timeout=2000)
