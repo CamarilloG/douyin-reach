@@ -13,8 +13,6 @@ set NO_PROXY=localhost,127.0.0.1
 export NO_PROXY=localhost,127.0.0.1
 ```
 
-或使用提供的启动脚本 `启动Web服务器.bat`（已自动配置）。
-
 ## 环境要求
 
 - **Python** 3.10～3.12（推荐；3.14 下部分依赖需编译）
@@ -24,17 +22,7 @@ export NO_PROXY=localhost,127.0.0.1
 
 ## 安装与运行
 
-### 0. 一键配置（推荐）
-
-在项目根目录执行，自动创建 venv、安装后端依赖、安装 Playwright Chromium、创建 data/logs、前端 npm install：
-
-```bash
-python scripts/setup_env.py
-```
-
-若完整 `pip install -r requirements.txt` 失败（如 Windows 编码或 pywebview 编译问题），脚本会自动改为只装 `playwright` 与 `python-dotenv`。
-
-### 1. 后端（手动）
+### 1. 后端
 
 ```bash
 python -m venv venv
@@ -83,16 +71,16 @@ python main.py
 
 **优势**: 浏览器窗口可见，可实时观察采集过程，方便调试和手动干预。
 
-1. **完成安装**：执行 `python scripts/setup_env.py` 或按上文手动安装。
+1. **完成安装**：按上文手动安装。
 2. **启动调试浏览器**：双击运行 `启动调试浏览器.bat`
 3. **登录抖音**：在打开的浏览器中扫码登录抖音
-4. **启动应用**：运行 `python main.py` 或 `start.bat`
+4. **启动应用**：运行 `python main.py`
 5. **创建任务**：在「任务管理」中创建任务，配置关键词、规则、私信模板
 6. **开始采集**：启动采集，可在浏览器窗口中实时观察
 
 ### 方式2: 自动启动模式（传统）
 
-1. **完成安装**：执行 `python scripts/setup_env.py` 或按上文手动安装。
+1. **完成安装**：按上文手动安装。
 2. **启动应用**：`cd src/frontend && npm run build && cd ../.. && python main.py`
 3. **登录抖音**：进入「系统设置」页，点击「打开登录浏览器」，用抖音扫码完成登录。Cookie 将保存至 `data/douyin_storage_state.json`，重启后自动登录。
 4. **创建任务**：在「任务管理」中创建任务，配置关键词（如「测试」）、规则、私信模板。
