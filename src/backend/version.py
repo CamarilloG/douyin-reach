@@ -15,8 +15,8 @@
 """
 from __future__ import annotations
 
-VERSION = "0.1.0b7"
-APP_NAME = "抖音助手"
+VERSION = "1.0.0c1"
+APP_NAME = "抖音助手 商业版"
 
 
 def get_version_string() -> str:
