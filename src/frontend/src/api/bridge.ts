@@ -3,6 +3,9 @@
  * 通过 window.pywebview.api.xxx() 直接调用 Python 后端方法
  */
 
+/** AI 接口规范：决定走 OpenAI 兼容协议还是 Anthropic 原生协议 */
+export type AIProviderType = 'openai' | 'anthropic'
+
 /** 设置结构 */
 export interface Settings {
   cdp_url?: string
@@ -13,6 +16,7 @@ export interface Settings {
   risk_warning_pause: number
   risk_danger_stop?: boolean
   linear_collection?: boolean
+  ai_provider_type?: AIProviderType
   ai_api_key: string
   ai_endpoint: string
   ai_model: string
@@ -25,9 +29,10 @@ const DEFAULT_SETTINGS: Settings = {
   send_interval: 30,
   daily_limit: 100,
   risk_warning_pause: 600,
+  ai_provider_type: 'openai',
   ai_api_key: '',
-  ai_endpoint: 'https://api.openai.com/v1',
-  ai_model: 'gpt-4',
+  ai_endpoint: '',
+  ai_model: '',
 }
 
 /**

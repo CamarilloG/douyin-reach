@@ -7,6 +7,47 @@
       <p>按关键词检索视频 → 提取评论与用户 → 规则筛选 → 私信触达。</p>
     </n-card>
 
+    <n-card title="AI 模型配置" size="small">
+      <n-form label-placement="left" label-width="100" style="max-width: 560px">
+        <n-form-item label="接口规范">
+          <n-select
+            v-model:value="aiSettings.ai_provider_type"
+            :options="providerOptions"
+            style="max-width: 280px"
+          />
+        </n-form-item>
+        <n-form-item label="API Base URL">
+          <n-input
+            v-model:value="aiSettings.ai_endpoint"
+            :placeholder="endpointPlaceholder"
+          />
+        </n-form-item>
+        <n-form-item label="API Key">
+          <n-input
+            v-model:value="aiSettings.ai_api_key"
+            type="password"
+            show-password-on="click"
+            placeholder="sk-***"
+          />
+        </n-form-item>
+        <n-form-item label="模型名称">
+          <n-input
+            v-model:value="aiSettings.ai_model"
+            :placeholder="modelPlaceholder"
+          />
+        </n-form-item>
+        <n-button type="primary" size="small" :loading="aiSaving" @click="saveAiSettings">
+          保存
+        </n-button>
+        <p style="color: #888; font-size: 12px; margin-top: 12px; line-height: 1.6;">
+          常见配置参考：<br />
+          • <b>DeepSeek</b>：规范 = OpenAI 兼容，Base URL = <code>https://api.deepseek.com/v1</code>，模型 = <code>deepseek-chat</code> / <code>deepseek-reasoner</code><br />
+          • <b>OpenRouter</b>：规范 = OpenAI 兼容，Base URL = <code>https://openrouter.ai/api/v1</code>，模型如 <code>anthropic/claude-sonnet-4</code> / <code>deepseek/deepseek-chat</code><br />
+          • <b>Anthropic 原生</b>：规范 = Anthropic，Base URL = <code>https://api.anthropic.com</code>，模型 = <code>claude-opus-4-7</code> 等
+        </p>
+      </n-form>
+    </n-card>
+
     <n-card title="软件授权" size="small">
       <div v-if="licenseInfo && licenseInfo.valid">
         <n-descriptions :column="1" size="small" label-placement="left" bordered>
@@ -74,19 +115,35 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import {
   NCard,
   NSpace,
   NButton,
   NTag,
   NH4,
+  NForm,
+  NFormItem,
+  NInput,
+  NSelect,
   NDescriptions,
   NDescriptionsItem,
   NPopconfirm,
   useMessage,
 } from 'naive-ui'
 import { bridge, isApiAvailable } from '@/api/bridge'
+
+type ProviderType = 'openai' | 'anthropic'
+
+const providerOptions = [
+  { label: 'OpenAI 兼容（DeepSeek / OpenRouter / Ollama 等）', value: 'openai' },
+  { label: 'Anthropic 原生（Claude）', value: 'anthropic' },
+]
+
+const PROVIDER_HINTS: Record<ProviderType, { endpoint: string; model: string }> = {
+  openai: { endpoint: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  anthropic: { endpoint: 'https://api.anthropic.com', model: 'claude-opus-4-7' },
+}
 
 type LicenseInfo =
   | {
@@ -110,6 +167,56 @@ const message = useMessage()
 const appInfo = ref<{ version: string; name: string }>({ version: '0.0.0', name: '抖音助手' })
 const licenseInfo = ref<LicenseInfo | null>(null)
 const deactivating = ref(false)
+
+const aiSettings = reactive<{
+  ai_provider_type: ProviderType
+  ai_endpoint: string
+  ai_api_key: string
+  ai_model: string
+}>({
+  ai_provider_type: 'openai',
+  ai_endpoint: '',
+  ai_api_key: '',
+  ai_model: '',
+})
+const aiSaving = ref(false)
+
+const endpointPlaceholder = computed(
+  () => PROVIDER_HINTS[aiSettings.ai_provider_type].endpoint,
+)
+const modelPlaceholder = computed(
+  () => PROVIDER_HINTS[aiSettings.ai_provider_type].model,
+)
+
+async function loadAiSettings() {
+  try {
+    const s = await bridge.get_settings()
+    const t = String(s.ai_provider_type ?? 'openai')
+    aiSettings.ai_provider_type = (t === 'anthropic' ? 'anthropic' : 'openai')
+    aiSettings.ai_endpoint = String(s.ai_endpoint ?? '')
+    aiSettings.ai_api_key = String(s.ai_api_key ?? '')
+    aiSettings.ai_model = String(s.ai_model ?? '')
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+async function saveAiSettings() {
+  aiSaving.value = true
+  try {
+    await bridge.update_settings({
+      ai_provider_type: aiSettings.ai_provider_type,
+      ai_endpoint: aiSettings.ai_endpoint.trim(),
+      ai_api_key: aiSettings.ai_api_key,
+      ai_model: aiSettings.ai_model.trim(),
+    })
+    message.success('AI 配置已保存')
+  } catch (e: any) {
+    message.error('保存失败：' + (e?.message ?? e))
+  } finally {
+    aiSaving.value = false
+  }
+}
 
 function formatDate(iso: string): string {
   try {
@@ -155,7 +262,7 @@ async function onDeactivate() {
 onMounted(async () => {
   const ok = await isApiAvailable()
   if (ok) {
-    await Promise.all([loadAppInfo(), loadLicenseInfo()])
+    await Promise.all([loadAppInfo(), loadLicenseInfo(), loadAiSettings()])
   } else {
     message.error('无法连接到后端服务器')
   }

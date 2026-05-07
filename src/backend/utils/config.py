@@ -20,6 +20,11 @@ _DEFAULTS = {
     "risk_warning_pause": 600,
     "risk_danger_stop": True,
     "linear_collection": True,  # 采集线性流程（首页搜索→点击卡片→返回），False 回退到 goto 批量模式
+    # AI 模型配置（用于评论/用户筛选，对接云端大模型）
+    # ai_provider_type 决定走哪种 API 协议：
+    #   "openai"    — OpenAI 兼容（DeepSeek / OpenRouter / Together / Groq / 本地 Ollama 等）
+    #   "anthropic" — Anthropic 原生（Claude）
+    "ai_provider_type": "openai",
     "ai_api_key": "",
     "ai_endpoint": "",
     "ai_model": "",
