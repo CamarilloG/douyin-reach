@@ -557,25 +557,103 @@ class DMSender:
                 return SendResult(
                     success=False,
                     failure_type="technical",
-                    failure_reason="未找到私信输入框（msg-input 容器或 DraftJS 容器缺失）",
+                    failure_reason="未找到私信输入框（msg-input 容器或 Slate 编辑器缺失）",
                     retryable=True,
                 )
 
-            # contenteditable div 需用 click + type 而非 fill
+            # 输入文本 — 对齐创作者通道 _insert_message 的 execCommand 路径。
+            # 之前用 press_sequentially（逐字符按键）在 Slate.js 编辑器上会出现"视觉有文字
+            # 但 Slate 内部 model 是空"的 false-input — 此时发送按钮不变红 (publishRedBtn)，
+            # click 是 no-op，浮窗一直停在"已开但没发出"的死状态，结果 _detect_send_result
+            # 4.5s 超时。execCommand('insertText') + 主动 dispatch InputEvent 是 Slate / DraftJS
+            # 都接受的标准路径，创作者通道实测稳定。
             t_input0 = time.monotonic()
-            await input_el.click(timeout=3000)
-            await asyncio.sleep(0.2)
-            await input_el.press_sequentially(message, delay=30)
+            try:
+                injected = await page.evaluate(
+                    """(payload) => {
+                        const {selector, altSelector, text} = payload;
+                        const el = document.querySelector(selector) || document.querySelector(altSelector);
+                        if (!el) return { ok: false, reason: 'no-editor' };
+                        el.focus();
+                        // 全选清空（防止上次残留）
+                        const range = document.createRange();
+                        range.selectNodeContents(el);
+                        const selObj = window.getSelection();
+                        selObj.removeAllRanges();
+                        selObj.addRange(range);
+                        try { document.execCommand('delete', false); } catch (_) {}
+                        // 插入文本（execCommand 在 contenteditable / Slate / DraftJS 都生效）
+                        const inserted = document.execCommand('insertText', false, text);
+                        // 主动 dispatch InputEvent 同步框架内部 model
+                        el.dispatchEvent(new InputEvent('input', {
+                            bubbles: true, inputType: 'insertText', data: text,
+                        }));
+                        return { ok: !!inserted, reason: inserted ? null : 'execCommand-returned-false' };
+                    }""",
+                    {
+                        "selector": sel.DM_INPUT_SELECTOR,
+                        "altSelector": sel.DM_INPUT_SELECTOR_ALT,
+                        "text": message,
+                    },
+                )
+            except Exception as e:
+                logger.warning("注入文本异常: %s", e)
+                injected = {"ok": False, "reason": f"exception:{e}"}
+            if not isinstance(injected, dict) or not injected.get("ok"):
+                # execCommand 注入失败 → fallback 到 press_sequentially（逐字符按键）
+                logger.info("execCommand 注入未生效 (%s), fallback press_sequentially",
+                            (injected or {}).get("reason"))
+                try:
+                    await input_el.click(timeout=3000)
+                    await asyncio.sleep(0.2)
+                    await input_el.press_sequentially(message, delay=30)
+                except Exception as e:
+                    return SendResult(
+                        success=False,
+                        failure_type="technical",
+                        failure_reason=f"输入文本失败：{e}",
+                        retryable=True,
+                    )
             await asyncio.sleep(0.3)
 
-            # 点击发送按钮（<span class="e2e-send-msg-btn">，无 disabled，直接 click）
+            # 等发送按钮"激活"（svg class 含 Red/Active/Enabled 任一）—
+            # 创作者通道走 button.disabled 判定，主站 svg 没有 disabled 属性，
+            # 抖音用 class "messageMsgInputpublishRedBtn" 表达激活态。
+            # 5s 内未变红 → 输入没真正进入 Slate state，发送会是 no-op，提前失败。
             send_method = "unknown"
+            try:
+                await page.wait_for_function(
+                    """(args) => {
+                        const [selector, pattern] = args;
+                        const btn = document.querySelector(selector);
+                        if (!btn) return false;
+                        const cls = btn.getAttribute('class') || '';
+                        return new RegExp(pattern).test(cls);
+                    }""",
+                    arg=[sel.DM_SEND_BTN_SELECTOR, sel.DM_SEND_BTN_ACTIVE_PATTERN],
+                    timeout=5000,
+                )
+                send_btn_ready = True
+            except Exception:
+                send_btn_ready = False
+                logger.warning("[主站] 发送按钮 5s 未激活（class 未含 Red/Active）— 输入可能未进 Slate state")
+
             send_btn = page.locator(sel.DM_SEND_BTN_SELECTOR).first
             if await send_btn.count() == 0:
                 send_btn = page.locator(f'.{sel.DM_SEND_BTN_CLASS}').first
-            if await send_btn.count() == 0:
+
+            if not send_btn_ready and await send_btn.count() == 0:
+                # 既没激活也找不到按钮 → 用 Enter 兜底
                 await input_el.press("Enter")
-                send_method = "Enter键"
+                send_method = "Enter键(兜底)"
+            elif not send_btn_ready:
+                # 找到按钮但未激活 → 仍尝试 click（Enter 偶尔不生效），失败由结果检测兜底
+                try:
+                    await send_btn.click(timeout=3000, force=True)
+                    send_method = "发送按钮(未激活强点)"
+                except Exception:
+                    await input_el.press("Enter")
+                    send_method = "Enter键(强点失败兜底)"
             else:
                 await send_btn.click(timeout=3000)
                 send_method = "发送按钮"

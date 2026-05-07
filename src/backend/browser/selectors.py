@@ -160,6 +160,10 @@ DM_INPUT_SELECTOR_ALT = '[data-e2e="msg-input"] div[data-slate-editor="true"]'
 DM_SEND_BTN_SELECTOR = '[data-e2e="msg-input"] .e2e-send-msg-btn'
 # 发送按钮 class（备用，全局唯一）
 DM_SEND_BTN_CLASS = "e2e-send-msg-btn"
+# 发送按钮"已激活"判定 — class 含 "Red/Active/Enabled" 任一即可。
+# 抖音实测：编辑器有内容时按钮 svg 加上 "messageMsgInputpublishRedBtn" 类（颜色由灰变红）。
+# 输入未真正进入 Slate state 时按钮不变红，click 是 no-op。
+DM_SEND_BTN_ACTIVE_PATTERN = r"Red|Active|Enabled|publish-active"
 # 输入框 placeholder 文案（Slate.js 用 data-placeholder 属性渲染）
 DM_INPUT_DESC = "发送消息"
 # 发送失败 / 业务限制文案（用于检测失败）
