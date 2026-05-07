@@ -561,59 +561,61 @@ class DMSender:
                     retryable=True,
                 )
 
-            # 输入文本 — 对齐创作者通道 _insert_message 的 execCommand 路径。
-            # 之前用 press_sequentially（逐字符按键）在 Slate.js 编辑器上会出现"视觉有文字
-            # 但 Slate 内部 model 是空"的 false-input — 此时发送按钮不变红 (publishRedBtn)，
-            # click 是 no-op，浮窗一直停在"已开但没发出"的死状态，结果 _detect_send_result
-            # 4.5s 超时。execCommand('insertText') + 主动 dispatch InputEvent 是 Slate / DraftJS
-            # 都接受的标准路径，创作者通道实测稳定。
+            # 输入文本 — 调研报告明确路径（docs/网络请求调研.txt §Step 4）：
+            # focus + Selection.collapse(end) + 真实键盘事件 (computer.type / press_sequentially)。
+            # ⚠️ 严禁用 execCommand('insertText'): Slate.js 维护独立 Editor.children model,
+            #    DOM 只是渲染产物。execCommand 改 DOM 但不调 Slate.Editor.insertText,
+            #    导致 model 仍是空 → 发送按钮取 model state 判断激活,永远不变红 → 100% 失败。
+            # (创作者通道用的是普通 contenteditable, execCommand 在那边能用, 跟主站场景不同。)
             t_input0 = time.monotonic()
             try:
-                injected = await page.evaluate(
+                # 1) 显式 focus 到真正的 Slate editable 节点 + 光标移到末尾。
+                #    单纯 input_el.click 偶发 focus 到祖先 wrapper,导致键盘事件目标错位。
+                focus_ok = await page.evaluate(
                     """(payload) => {
-                        const {selector, altSelector, text} = payload;
+                        const {selector, altSelector} = payload;
                         const el = document.querySelector(selector) || document.querySelector(altSelector);
                         if (!el) return { ok: false, reason: 'no-editor' };
                         el.focus();
-                        // 全选清空（防止上次残留）
-                        const range = document.createRange();
-                        range.selectNodeContents(el);
-                        const selObj = window.getSelection();
-                        selObj.removeAllRanges();
-                        selObj.addRange(range);
-                        try { document.execCommand('delete', false); } catch (_) {}
-                        // 插入文本（execCommand 在 contenteditable / Slate / DraftJS 都生效）
-                        const inserted = document.execCommand('insertText', false, text);
-                        // 主动 dispatch InputEvent 同步框架内部 model
-                        el.dispatchEvent(new InputEvent('input', {
-                            bubbles: true, inputType: 'insertText', data: text,
-                        }));
-                        return { ok: !!inserted, reason: inserted ? null : 'execCommand-returned-false' };
+                        // 把光标移到末尾(Selection.collapse(end))
+                        try {
+                            const range = document.createRange();
+                            range.selectNodeContents(el);
+                            range.collapse(false);  // collapse to end
+                            const selObj = window.getSelection();
+                            selObj.removeAllRanges();
+                            selObj.addRange(range);
+                        } catch (_) {}
+                        return { ok: true, tag: el.tagName, slate: el.getAttribute('data-slate-editor') };
                     }""",
                     {
                         "selector": sel.DM_INPUT_SELECTOR,
                         "altSelector": sel.DM_INPUT_SELECTOR_ALT,
-                        "text": message,
                     },
                 )
             except Exception as e:
-                logger.warning("注入文本异常: %s", e)
-                injected = {"ok": False, "reason": f"exception:{e}"}
-            if not isinstance(injected, dict) or not injected.get("ok"):
-                # execCommand 注入失败 → fallback 到 press_sequentially（逐字符按键）
-                logger.info("execCommand 注入未生效 (%s), fallback press_sequentially",
-                            (injected or {}).get("reason"))
-                try:
-                    await input_el.click(timeout=3000)
-                    await asyncio.sleep(0.2)
-                    await input_el.press_sequentially(message, delay=30)
-                except Exception as e:
-                    return SendResult(
-                        success=False,
-                        failure_type="technical",
-                        failure_reason=f"输入文本失败：{e}",
-                        retryable=True,
-                    )
+                logger.warning("focus 输入框异常: %s", e)
+                focus_ok = {"ok": False, "reason": f"exception:{e}"}
+            if not isinstance(focus_ok, dict) or not focus_ok.get("ok"):
+                return SendResult(
+                    success=False,
+                    failure_type="technical",
+                    failure_reason=f"输入框未找到/focus 失败：{(focus_ok or {}).get('reason')}",
+                    retryable=True,
+                )
+
+            # 2) 真实键盘事件输入 —— Playwright press_sequentially 走 CDP Input.insertText
+            #    /Input.dispatchKeyEvent, 等价于 IME composition, Slate 的 onBeforeInput
+            #    回调能正确捕获 → Editor.insertText 更新 model → 按钮变红。
+            try:
+                await input_el.press_sequentially(message, delay=30)
+            except Exception as e:
+                return SendResult(
+                    success=False,
+                    failure_type="technical",
+                    failure_reason=f"输入文本失败：{e}",
+                    retryable=True,
+                )
             await asyncio.sleep(0.3)
 
             # 等发送按钮"激活"（svg class 含 Red/Active/Enabled 任一）—
@@ -638,22 +640,35 @@ class DMSender:
                 send_btn_ready = False
                 logger.warning("[主站] 发送按钮 5s 未激活（class 未含 Red/Active）— 输入可能未进 Slate state")
 
+            # 按钮未激活 = Slate 内部 model 仍为空 = 服务端发送是 no-op。
+            # 强点 click 灰色按钮也不会真发出去,反而消耗时间 + 干扰外层 retry 判断。
+            # 直接 fail-fast 让外层 retry 重新走 fresh navigate (大概率新 page 上 Slate
+            # 能正确接收键盘事件)。
+            if not send_btn_ready:
+                # 抓一份现场 HTML 留证 (跟浮窗失败那块同款机制)
+                try:
+                    from src.backend.utils.paths import get_data_path
+                    snap_path = get_data_path(f"debug_dm_input_inactive_{sec_uid[:16]}.html")
+                    snap_html = await page.content()
+                    with open(snap_path, "w", encoding="utf-8") as f:
+                        f.write(snap_html)
+                    logger.warning("[诊断] 输入未生效已抓现场: %s", snap_path)
+                except Exception:
+                    pass
+                return SendResult(
+                    success=False,
+                    failure_type="technical",
+                    failure_reason="输入未进入 Slate state（发送按钮 5s 未变红激活）",
+                    retryable=True,
+                )
+
             send_btn = page.locator(sel.DM_SEND_BTN_SELECTOR).first
             if await send_btn.count() == 0:
                 send_btn = page.locator(f'.{sel.DM_SEND_BTN_CLASS}').first
-
-            if not send_btn_ready and await send_btn.count() == 0:
-                # 既没激活也找不到按钮 → 用 Enter 兜底
+            if await send_btn.count() == 0:
+                # 按钮激活但 selector 找不到（理论上不应该发生）→ Enter 兜底
                 await input_el.press("Enter")
-                send_method = "Enter键(兜底)"
-            elif not send_btn_ready:
-                # 找到按钮但未激活 → 仍尝试 click（Enter 偶尔不生效），失败由结果检测兜底
-                try:
-                    await send_btn.click(timeout=3000, force=True)
-                    send_method = "发送按钮(未激活强点)"
-                except Exception:
-                    await input_el.press("Enter")
-                    send_method = "Enter键(强点失败兜底)"
+                send_method = "Enter键(按钮选择器丢失)"
             else:
                 await send_btn.click(timeout=3000)
                 send_method = "发送按钮"
