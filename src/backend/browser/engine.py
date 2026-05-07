@@ -191,8 +191,13 @@ class BrowserEngine:
                 self._page = pages[0] if pages else await self._context.new_page()
             return
 
+        # ⚠️ viewport 至少 1920×1080：抖音用户主页弹出的私信浮窗在右侧固定布局,
+        # 内部发送按钮 svg.e2e-send-msg-btn 实测渲染在 x≈1830 的位置 (实测 docs/网络请求调研.txt)。
+        # viewport=1280 时发送按钮坐标在视口外 550px, 所有 click 方法
+        # (locator.click / mouse.click 物理坐标 / dispatchEvent) 都点不到。
+        # 表现为：输入 ✓ 按钮变红 ✓ click ✗。
         opts: dict[str, Any] = {
-            "viewport": {"width": 1280, "height": 800},
+            "viewport": {"width": 1920, "height": 1080},
             "locale": "zh-CN",
         }
         if os.path.isfile(self._storage_path):
@@ -206,12 +211,16 @@ class BrowserEngine:
         profile_dir = get_data_path(f"{browser_name}_automation_profile")
         os.makedirs(profile_dir, exist_ok=True)
 
+        # ⚠️ 必须 1920×1080：抖音私信浮窗内的发送按钮渲染在 x≈1830 位置,
+        # 窗口太窄按钮会落在视口外, click 完全无效 (输入 ✓ 按钮变红 ✓ 但 click ✗)。
         args = [
             browser_path,
             f"--remote-debugging-port={cdp_port}",
             f"--user-data-dir={profile_dir}",
             "--no-first-run",
             "--no-default-browser-check",
+            "--window-size=1920,1080",
+            "--window-position=0,0",
             sel.BASE_URL,
         ]
         if browser_name == "edge":
