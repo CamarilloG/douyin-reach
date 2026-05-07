@@ -27,7 +27,8 @@ node_modules/
 *.swo
 
 # 数据目录（含 Chrome 用户数据、数据库、登录态、settings 等，统一忽略）
-data/
+# 注意：必须锚定到根，避免误伤 src/backend/data 源码模块
+/data/
 
 # 日志
 logs/
