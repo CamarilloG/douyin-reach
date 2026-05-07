@@ -123,9 +123,10 @@ async def _run_sending_async(task_id: int) -> None:
     try:
         await engine.launch()
         if not await engine.check_session():
-            crud.log_insert(conn, task_id, "error", "send_pipeline", "未登录或 session 失效")
-            set_task_status(task_id, TaskStatus.error.value, last_error="未登录或 session 失效")
-            crud.task_execution_finish(conn, exec_id, "failed", "未登录或 session 失效")
+            msg = "未登录抖音 / 登录已失效。请在已弹出的浏览器中扫码登录抖音，再重新点击「启动发送」。"
+            crud.log_insert(conn, task_id, "error", "send_pipeline", msg)
+            set_task_status(task_id, TaskStatus.error.value, last_error=msg)
+            crud.task_execution_finish(conn, exec_id, "failed", msg)
             return
 
         if dm_channel == "creator":

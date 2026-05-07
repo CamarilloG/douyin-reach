@@ -74,7 +74,11 @@ def run_collection(task_id: int) -> bool:
             return False
     else:
         if not ensure_transition(status, TaskStatus.collecting.value):
-            logger.warning("任务 %s 状态 %s 不允许启动采集", task_id, status)
+            logger.warning(
+                "任务 %s 当前状态 %s 不允许启动采集(合法状态转换见 task/state.py 转换表)",
+                task_id,
+                status,
+            )
             return False
         if not claim_collecting(task_id):
             logger.warning("已有其他任务在采集中，无法启动任务 %s", task_id)
@@ -163,8 +167,9 @@ async def _run_collection_async(task_id: int) -> None:
         engine.set_risk_callbacks(on_warning=_on_warning, on_danger=_on_danger)
         debug_step.step("pipeline_check_session", "请求 user/settings 校验 session")
         if not await engine.check_session():
-            crud.log_insert(conn, task_id, "error", "pipeline", "未登录或 session 失效")
-            set_task_status(task_id, TaskStatus.error.value, last_error="未登录或 session 失效")
+            msg = "未登录抖音 / 登录已失效。请在已弹出的浏览器中扫码登录抖音，再重新点击「启动采集」。"
+            crud.log_insert(conn, task_id, "error", "pipeline", msg)
+            set_task_status(task_id, TaskStatus.error.value, last_error=msg)
             return
 
         use_linear = bool(get_config().get("linear_collection", True))

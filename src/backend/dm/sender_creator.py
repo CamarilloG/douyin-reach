@@ -21,6 +21,7 @@ from src.backend.browser import BrowserEngine
 from src.backend.browser import selectors as sel
 from src.backend.browser.risk import RiskLevel
 
+from ._store_trigger import trigger_via_store, wait_popup_ready
 from .sender import SendResult
 
 logger = logging.getLogger(__name__)
@@ -190,7 +191,7 @@ class CreatorDMSender:
         # 基于 2026-04-21 调研：主站页面挂载 MobX 的 window.conversationStore，
         # 点击私信按钮的唯一可观测副作用是 setCurConversation("0:1:<min>:<max>")。
         # 只要能拿到 from_uid / to_uid 就能直接调 store 触发浮窗挂载，完全不走 DOM。
-        store_ok, store_err = await self._trigger_via_store(page, sec_uid)
+        store_ok, store_err = await trigger_via_store(page, sec_uid)
         if store_ok:
             logger.info("[创作者] store 直驱成功，跳过 DOM 点击")
             return await self._wait_dialog_and_hint(page)
@@ -562,140 +563,21 @@ class CreatorDMSender:
     async def _wait_dialog_and_hint(
         self, page: Any, already_opened: bool = False
     ) -> tuple[bool, Optional[SendResult]]:
-        """触发后统一等：im-dialog 实际尺寸 + 系统提示文字。返回 send_dm 需要的 tuple。"""
-        if not already_opened:
-            # store 路径下浮窗 DOM 早就存在但尺寸为 0，要等 setCurConversation 之后被展开
-            try:
-                await page.wait_for_function(
-                    """(sel) => {
-                        const d = document.querySelector(sel);
-                        if (!d) return false;
-                        const r = d.getBoundingClientRect();
-                        return r.width > 100 && r.height > 100;
-                    }""",
-                    arg=sel.DM_DIALOG_SELECTOR,
-                    timeout=10000,
-                )
-            except Exception:
-                return False, SendResult(
-                    success=False,
-                    failure_type="technical",
-                    failure_reason="setCurConversation 后浮窗未展开（可能还有其它 state 控制 open/close）",
-                    retryable=True,
-                )
-
-        # 等系统提示 —— 创作者中心会话同步的前提（陌生人会话必出）
-        try:
-            await page.wait_for_function(
-                """(args) => {
-                    const [dialogSel, keyword] = args;
-                    const c = document.querySelector(dialogSel);
-                    if (!c) return false;
-                    return (c.innerText || '').includes(keyword);
-                }""",
-                arg=[sel.DM_DIALOG_SELECTOR, sel.DM_ONE_MSG_LIMIT],
-                timeout=6000,
-            )
-            logger.info("[创作者] 主站系统提示已出现 -> 会话已同步到服务端")
-        except Exception:
-            logger.info("[创作者] 未捕获「只能发送一条」提示（可能是老会话），回落固定 2s 缓冲")
-            await asyncio.sleep(2.0)
-        return True, None
-
-    # ---------------- Store 直驱 ----------------
-    async def _trigger_via_store(
-        self, page: Any, sec_uid: str
-    ) -> tuple[bool, Optional[str]]:
-        """通过 window.conversationStore.setCurConversation 直接打开浮窗。
-        返回 (是否触发成功, 失败原因字符串 or None)。
-        触发成功不代表浮窗已展开 —— 展开由 _wait_dialog_and_hint 校验。
+        """触发后统一等浮窗就绪。逻辑已抽到 _store_trigger.wait_popup_ready 共用。
+        already_opened=True 时跳过尺寸闸,只等系统提示文字+缓冲(用于已开浮窗的二次校验)。
         """
-        # 1. 等 conversationStore 挂上（SPA 异步初始化最多 10s）
-        try:
-            await page.wait_for_function(
-                "() => typeof window.conversationStore === 'object' && window.conversationStore !== null "
-                "&& typeof window.conversationStore.setCurConversation === 'function'",
-                timeout=10000,
+        ready = await wait_popup_ready(
+            page,
+            expand_timeout=0 if already_opened else 10000,
+            hint_timeout=6000,
+        )
+        if not ready:
+            return False, SendResult(
+                success=False,
+                failure_type="technical",
+                failure_reason="setCurConversation 后浮窗未展开（可能还有其它 state 控制 open/close）",
+                retryable=True,
             )
-        except Exception:
-            return False, "conversationStore_not_ready"
-
-        # 2. 执行：抠 from_uid / to_uid → BigInt 排序 → setCurConversation
-        result = await page.evaluate(
-            """(secUid) => {
-                const out = { ok: false, reason: null, fromUid: null, toUid: null, convId: null };
-                const store = window.conversationStore;
-                const uStore = window.userInfoStore;
-
-                // --- 抠 from_uid / to_uid ---
-                // 优先 userInfoStore，其次 SSR <script> 里的注入
-                try {
-                    const login = uStore && uStore.curLoginUserInfo;
-                    if (login && login.uid) out.fromUid = String(login.uid);
-                } catch (e) {}
-                try {
-                    if (uStore && typeof uStore.getUserBySecUid === 'function') {
-                        const info = uStore.getUserBySecUid(secUid);
-                        if (info && info.uid) out.toUid = String(info.uid);
-                    }
-                    if (!out.toUid && uStore && uStore.secUidToUidMap) {
-                        const m = uStore.secUidToUidMap;
-                        const v = (m && typeof m.get === 'function') ? m.get(secUid) : m[secUid];
-                        if (v) out.toUid = String(v);
-                    }
-                } catch (e) {}
-                if (!out.fromUid || !out.toUid) {
-                    // SSR 兜底：兼容转义 \\\"to_uid\\\": 和非转义 "to_uid":
-                    const scripts = [...document.querySelectorAll('script')].map(s => s.textContent || '');
-                    const reFrom = /\\\\?"from_uid\\\\?"\\s*:\\s*\\\\?"?(\\d+)\\\\?"?/;
-                    const reTo = /\\\\?"to_uid\\\\?"\\s*:\\s*\\\\?"?(\\d+)\\\\?"?/;
-                    for (const s of scripts) {
-                        if (!out.fromUid) { const m = s.match(reFrom); if (m) out.fromUid = m[1]; }
-                        if (!out.toUid)   { const m = s.match(reTo);   if (m) out.toUid = m[1]; }
-                        if (out.fromUid && out.toUid) break;
-                    }
-                }
-                if (!out.fromUid || !out.toUid) {
-                    out.reason = 'missing_uids';
-                    return out;
-                }
-
-                // --- BigInt 升序排序拼 conversation_id ---
-                let lo = out.fromUid, hi = out.toUid;
-                try {
-                    if (BigInt(lo) > BigInt(hi)) { const t = lo; lo = hi; hi = t; }
-                } catch (e) {
-                    out.reason = 'bigint_error:' + String(e);
-                    return out;
-                }
-                out.convId = '0:1:' + lo + ':' + hi;
-
-                // --- 调 store ---
-                try {
-                    if (typeof store.setEnterMethod === 'function') {
-                        store.setEnterMethod('profile');
-                    }
-                    store.setCurConversation(out.convId);
-                    out.ok = true;
-                    return out;
-                } catch (e) {
-                    out.reason = 'set_cur_conversation_threw:' + String(e);
-                    return out;
-                }
-            }""",
-            sec_uid,
-        )
-
-        if not isinstance(result, dict):
-            return False, "evaluate_returned_non_dict"
-        if not result.get("ok"):
-            return False, str(result.get("reason") or "unknown")
-        logger.info(
-            "[创作者] store 直驱已调 setCurConversation | convId=%s fromUid=%s toUid=%s",
-            result.get("convId"),
-            result.get("fromUid"),
-            result.get("toUid"),
-        )
         return True, None
 
     # ---------------- 创作者中心会话同步 ----------------

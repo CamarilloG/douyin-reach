@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import traceback
@@ -22,6 +23,16 @@ import traceback
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+# 默认日志级别 INFO:私信发送 store 直驱路径、浏览器引擎降级、风控状态等诊断信息
+# 都是 logger.info,默认 WARNING 会全部静默,排错时不可用。
+# 设置 DOUYIN_REACH_LOG=DEBUG 可进一步打开 DEBUG。
+_LOG_LEVEL = os.getenv("DOUYIN_REACH_LOG", "INFO").upper()
+logging.basicConfig(
+    level=getattr(logging, _LOG_LEVEL, logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def _show_fatal_and_exit(message: str, details: str = "") -> None:

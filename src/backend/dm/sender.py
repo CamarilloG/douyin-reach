@@ -12,6 +12,7 @@ from typing import Any, Optional
 from src.backend.browser import BrowserEngine
 from src.backend.browser import selectors as sel
 from src.backend.browser.risk import RiskLevel
+from ._store_trigger import trigger_via_store, wait_popup_ready
 
 logger = logging.getLogger(__name__)
 
@@ -207,96 +208,7 @@ class DMSender:
                     retryable=True,
                 )
 
-            candidates_raw = combined.get("dmButtons", [])
-
-            # 按钮未找到时，可能是页面尚未渲染完成（SPA 异步加载），轮询重试最多 3s
-            if not candidates_raw:
-                # 先检查是否明确为不可达用户（不需要重试）
-                page_text = combined.get("pageSnippet", "")
-                if "用户不存在" in page_text or "该页面" in page_text or "无法访问" in page_text:
-                    logger.warning("无私信按钮(用户不可达) | URL=%s | 页面摘要: %s", current_url, page_text[:100])
-                    return SendResult(
-                        success=False,
-                        failure_type="business",
-                        failure_reason="用户页面不可访问（不存在或隐私账号）",
-                        retryable=False,
-                    )
-                # 页面可能还在渲染，轮询等待私信按钮出现
-                _JS_FIND_DM_BTNS = """() => {
-                    const results = [];
-                    const btns = document.querySelectorAll('button, [role="button"]');
-                    for (let i = 0; i < btns.length; i++) {
-                        const btn = btns[i];
-                        const text = (btn.textContent || '').trim();
-                        if (text !== '私信') continue;
-                        const rect = btn.getBoundingClientRect();
-                        if (rect.width <= 0 || rect.height <= 0) continue;
-                        if (btn.offsetParent === null) continue;
-                        const inDetail = !!btn.closest('[data-e2e="user-detail"]');
-                        results.push({ index: i, priority: inDetail ? 0 : 1, y: rect.y });
-                    }
-                    return results;
-                }"""
-                for _retry in range(6):  # 6 × 0.5s = 3s
-                    await asyncio.sleep(0.5)
-                    candidates_raw = await page.evaluate(_JS_FIND_DM_BTNS)
-                    if candidates_raw:
-                        logger.info("[计时] 按钮重试 %d 次后找到 | 额外等待 %.1fs", _retry + 1, (_retry + 1) * 0.5)
-                        break
-
-            if not candidates_raw:
-                page_text = ""
-                try:
-                    page_text = await page.evaluate("() => (document.body.innerText || '').slice(0, 500)")
-                except Exception:
-                    pass
-                reason = "未找到可见的私信按钮"
-                if "用户不存在" in page_text or "该页面" in page_text or "无法访问" in page_text:
-                    reason = "用户页面不可访问（不存在或隐私账号）"
-                    logger.warning("无私信按钮(用户不可达) | URL=%s | 页面摘要: %s", current_url, page_text[:100])
-                    return SendResult(
-                        success=False,
-                        failure_type="business",
-                        failure_reason=reason,
-                        retryable=False,
-                    )
-                logger.warning("无私信按钮(重试后仍未找到) | URL=%s | 页面摘要: %s", current_url, page_text[:100])
-                return SendResult(
-                    success=False,
-                    failure_type="technical",
-                    failure_reason=reason,
-                    retryable=True,
-                )
-
-            # 排序：先按 priority（user-detail 内优先），再按 y 坐标大
-            candidates_raw.sort(key=lambda c: (c["priority"], -c.get("y", 0)))
-            chosen = candidates_raw[0]
-            dm_btn = page.locator('button, [role="button"]').nth(chosen["index"])
-            logger.info("选中私信按钮: priority=%d, y=%.0f, 候选详情=%s",
-                        chosen["priority"], chosen.get("y", 0), candidates_raw)
-
-            try:
-                await dm_btn.scroll_into_view_if_needed(timeout=2000)
-            except Exception:
-                pass
-
-            # 点击并记录通过哪种方式成功
-            click_method = "unknown"
-            try:
-                await dm_btn.click(timeout=5000)
-                click_method = "click()"
-            except Exception as e:
-                logger.warning("私信按钮常规 click 失败: %s，尝试 dispatch_event", e)
-                try:
-                    await dm_btn.dispatch_event("click")
-                    click_method = "dispatch_event"
-                except Exception as e2:
-                    logger.warning("dispatch_event 也失败: %s", e2)
-                    click_method = "both_failed"
-            t_click = time.monotonic()
-            logger.info("[计时] 按钮点击 %.1fs | 方式: %s", t_click - t_btn0, click_method)
-
-            # 等待私信浮窗就绪：用逗号分隔的 OR 选择器，任一匹配即成功。
+            # ---------- 浮窗就绪等待器 (store 直驱与 DOM click 兜底两条路径共用) ----------
             _popup_selector = ", ".join([
                 sel.DM_INPUT_SELECTOR,
                 sel.DM_INPUT_SELECTOR_ALT,
@@ -310,21 +222,145 @@ class DMSender:
                 except Exception:
                     return False
 
-            opened = await _wait_popup(15000)
-            popup_method = "首次等待" if opened else ""
+            # ---------- 首选: store 直驱 (零 DOM,省 5-15s/条) ----------
+            # 与创作者通道 _light_touch_main 同款机制 (dm/_store_trigger.py)。
+            # 直接调 window.conversationStore.setCurConversation 触发浮窗,
+            # 跳过 "找按钮 → scroll → click → 失败重试 click" 整段链路,且抗按钮 hash 漂移。
+            # 失败自动回落 DOM click 路径,fail-closed 行为完全不变。
+            popup_method = ""
+            click_method = "skip(store_direct)"
+            t_store0 = time.monotonic()
+            opened = False
+            # store 直驱后浮窗"已可交互"判定 = 共用 wait_popup_ready (创作者通道实测稳定):
+            #   闸 1: [data-e2e="im-dialog"] boundingClientRect > 100×100 (外壳撑开)
+            #   闸 2: 浮窗 innerText 包含 "只能发送一条" (内部组件 mount 完成),
+            #         捕获不到则固定 2s 缓冲 (老会话不会有此提示)
+            # 之前漏抄闸 2 时,实测 input_el.click(3000ms) 在浮窗"半就绪"状态下 timeout。
+            store_ok, store_err = await trigger_via_store(page, sec_uid)
+            if store_ok:
+                if await wait_popup_ready(page):
+                    opened = True
+                    popup_method = "store 直驱"
+                    logger.info(
+                        "[计时] store 直驱 + 浮窗就绪 %.1fs | 跳过 DOM 按钮点击",
+                        time.monotonic() - t_store0,
+                    )
+                else:
+                    logger.info(
+                        "[计时] store 调用成功但浮窗 %.1fs 内未达可交互状态,回落 DOM click",
+                        time.monotonic() - t_store0,
+                    )
+            else:
+                logger.info("store 直驱不可用 (%s) | 走 DOM 兜底", store_err)
+
+            t_click = time.monotonic()  # 给后续 [计时] 日志一个合理基准
+
+            # ---------- 兜底: DOM click (原逻辑) ----------
             if not opened:
-                logger.info("首次等待浮窗失败(15s)，重试点击")
+                candidates_raw = combined.get("dmButtons", [])
+
+                # 按钮未找到时，可能是页面尚未渲染完成（SPA 异步加载），轮询重试最多 3s
+                if not candidates_raw:
+                    # 先检查是否明确为不可达用户（不需要重试）
+                    page_text = combined.get("pageSnippet", "")
+                    if "用户不存在" in page_text or "该页面" in page_text or "无法访问" in page_text:
+                        logger.warning("无私信按钮(用户不可达) | URL=%s | 页面摘要: %s", current_url, page_text[:100])
+                        return SendResult(
+                            success=False,
+                            failure_type="business",
+                            failure_reason="用户页面不可访问（不存在或隐私账号）",
+                            retryable=False,
+                        )
+                    # 页面可能还在渲染，轮询等待私信按钮出现
+                    _JS_FIND_DM_BTNS = """() => {
+                        const results = [];
+                        const btns = document.querySelectorAll('button, [role="button"]');
+                        for (let i = 0; i < btns.length; i++) {
+                            const btn = btns[i];
+                            const text = (btn.textContent || '').trim();
+                            if (text !== '私信') continue;
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width <= 0 || rect.height <= 0) continue;
+                            if (btn.offsetParent === null) continue;
+                            const inDetail = !!btn.closest('[data-e2e="user-detail"]');
+                            results.push({ index: i, priority: inDetail ? 0 : 1, y: rect.y });
+                        }
+                        return results;
+                    }"""
+                    for _retry in range(6):  # 6 × 0.5s = 3s
+                        await asyncio.sleep(0.5)
+                        candidates_raw = await page.evaluate(_JS_FIND_DM_BTNS)
+                        if candidates_raw:
+                            logger.info("[计时] 按钮重试 %d 次后找到 | 额外等待 %.1fs", _retry + 1, (_retry + 1) * 0.5)
+                            break
+
+                if not candidates_raw:
+                    page_text = ""
+                    try:
+                        page_text = await page.evaluate("() => (document.body.innerText || '').slice(0, 500)")
+                    except Exception:
+                        pass
+                    reason = "未找到可见的私信按钮"
+                    if "用户不存在" in page_text or "该页面" in page_text or "无法访问" in page_text:
+                        reason = "用户页面不可访问（不存在或隐私账号）"
+                        logger.warning("无私信按钮(用户不可达) | URL=%s | 页面摘要: %s", current_url, page_text[:100])
+                        return SendResult(
+                            success=False,
+                            failure_type="business",
+                            failure_reason=reason,
+                            retryable=False,
+                        )
+                    logger.warning("无私信按钮(重试后仍未找到) | URL=%s | 页面摘要: %s", current_url, page_text[:100])
+                    return SendResult(
+                        success=False,
+                        failure_type="technical",
+                        failure_reason=reason,
+                        retryable=True,
+                    )
+
+                # 排序：先按 priority（user-detail 内优先），再按 y 坐标大
+                candidates_raw.sort(key=lambda c: (c["priority"], -c.get("y", 0)))
+                chosen = candidates_raw[0]
+                dm_btn = page.locator('button, [role="button"]').nth(chosen["index"])
+                logger.info("选中私信按钮: priority=%d, y=%.0f, 候选详情=%s",
+                            chosen["priority"], chosen.get("y", 0), candidates_raw)
+
                 try:
-                    await dm_btn.dispatch_event("click")
+                    await dm_btn.scroll_into_view_if_needed(timeout=2000)
                 except Exception:
                     pass
+
+                # 点击并记录通过哪种方式成功
+                click_method = "unknown"
                 try:
-                    await dm_btn.click(timeout=3000, force=True)
-                except Exception:
-                    pass
-                opened = await _wait_popup(10000)
-                if opened:
-                    popup_method = "重试点击后等待"
+                    await dm_btn.click(timeout=5000)
+                    click_method = "click()"
+                except Exception as e:
+                    logger.warning("私信按钮常规 click 失败: %s，尝试 dispatch_event", e)
+                    try:
+                        await dm_btn.dispatch_event("click")
+                        click_method = "dispatch_event"
+                    except Exception as e2:
+                        logger.warning("dispatch_event 也失败: %s", e2)
+                        click_method = "both_failed"
+                t_click = time.monotonic()
+                logger.info("[计时] 按钮点击 %.1fs | 方式: %s", t_click - t_btn0, click_method)
+
+                opened = await _wait_popup(15000)
+                popup_method = "DOM 首次等待" if opened else ""
+                if not opened:
+                    logger.info("首次等待浮窗失败(15s)，重试点击")
+                    try:
+                        await dm_btn.dispatch_event("click")
+                    except Exception:
+                        pass
+                    try:
+                        await dm_btn.click(timeout=3000, force=True)
+                    except Exception:
+                        pass
+                    opened = await _wait_popup(10000)
+                    if opened:
+                        popup_method = "DOM 重试点击后等待"
 
             t_popup = time.monotonic()
             if opened:
@@ -346,6 +382,17 @@ class DMSender:
                             t_popup - t_click, popup_method, matched_sel, click_method)
             else:
                 logger.warning("[计时] 浮窗打开失败 %.1fs | 已重试", t_popup - t_click)
+                # 抓页面 HTML 留证,供下一次排查 DOM 漂移 / 登录态 / 用户不可达
+                try:
+                    from src.backend.utils.paths import get_data_path
+
+                    snap_path = get_data_path(f"debug_dm_popup_fail_{sec_uid[:16]}.html")
+                    snap_html = await page.content()
+                    with open(snap_path, "w", encoding="utf-8") as f:
+                        f.write(snap_html)
+                    logger.warning("[诊断] 已抓页面 HTML 留证:%s", snap_path)
+                except Exception as _snap_err:
+                    logger.debug("抓 popup-fail 快照失败: %s", _snap_err)
                 return SendResult(
                     success=False,
                     failure_type="technical",
