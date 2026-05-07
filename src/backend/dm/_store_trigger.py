@@ -122,7 +122,7 @@ async def wait_popup_ready(
     page: Any,
     *,
     expand_timeout: int = 10000,
-    hint_timeout: int = 6000,
+    hint_timeout: int = 2000,
     fallback_buffer_s: float = 2.0,
 ) -> bool:
     """store 直驱后等浮窗"真正可交互"——与创作者通道 _wait_dialog_and_hint 同款两道闸。

@@ -346,21 +346,13 @@ class DMSender:
                 t_click = time.monotonic()
                 logger.info("[计时] 按钮点击 %.1fs | 方式: %s", t_click - t_btn0, click_method)
 
-                opened = await _wait_popup(15000)
-                popup_method = "DOM 首次等待" if opened else ""
-                if not opened:
-                    logger.info("首次等待浮窗失败(15s)，重试点击")
-                    try:
-                        await dm_btn.dispatch_event("click")
-                    except Exception:
-                        pass
-                    try:
-                        await dm_btn.click(timeout=3000, force=True)
-                    except Exception:
-                        pass
-                    opened = await _wait_popup(10000)
-                    if opened:
-                        popup_method = "DOM 重试点击后等待"
+                # 单次等待：浮窗未在 8s 内出现就交给外层 pipeline 决定是否重试。
+                # 历史上这里有"再点一次按钮 + 再等 10s"的二次重试，但当浮窗其实在
+                # 打开过程中（首次 wait 已触发但未捕获到），二次 click 会 toggle 关闭浮窗，
+                # 反复点同一个按钮还会被风控盯上。fail-fast → 外层 retry_limit 控制
+                # 整体成本，而每次外层重试都是 fresh navigate，不会落到这种半就绪状态。
+                opened = await _wait_popup(8000)
+                popup_method = "DOM 单次等待" if opened else ""
 
             t_popup = time.monotonic()
             if opened:

@@ -27,7 +27,11 @@ _SEND_INTERVAL_DEFAULT = 45
 _INTERVAL_JITTER = 0.3
 _DAILY_LIMIT_DEFAULT = 30
 _TASK_LIMIT_DEFAULT = 50
-_MAX_RETRY = 2
+# 外层重试上限（每个用户最多 1+_MAX_RETRY 次完整尝试，超出标记 failed 并跳到下一个）。
+# 之前默认 2 + 单次 send_dm 最多 ~40s + 二次重试点击同一按钮 → 单用户最坏卡 ~140s，
+# 视觉上像"反复操作同一用户"。改为 1：单用户最坏 ~60s，明显减少滞留。
+# 用户可通过 task.retry_limit 字段覆盖（前端"任务编辑→失败重试上限"）。
+_MAX_RETRY = 1
 _RETRY_BACKOFF = 10.0
 
 # 发送中暂停/停止标志（通过任务状态判断）
