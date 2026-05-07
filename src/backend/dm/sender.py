@@ -373,7 +373,42 @@ class DMSender:
                 logger.info("[计时] 浮窗打开 %.1fs | 途径: %s | 匹配选择器: %s | 按钮点击方式: %s",
                             t_popup - t_click, popup_method, matched_sel, click_method)
             else:
-                logger.warning("[计时] 浮窗打开失败 %.1fs | 已重试", t_popup - t_click)
+                # 诊断详情：记录每个候选 selector 当前是否在 DOM 中、是否可见、bbox。
+                # 这样能直接看出"selector 漂移 vs 浮窗 mount 中 vs 浮窗压根没触发"。
+                diag: dict[str, Any] = {}
+                for name, s in [
+                    ("im-dialog", sel.DM_DIALOG_SELECTOR),
+                    ("msg-input", sel.DM_MSG_INPUT_CONTAINER),
+                    ("input(e2e)", sel.DM_INPUT_SELECTOR),
+                    ("input(alt)", sel.DM_INPUT_SELECTOR_ALT),
+                    ("send-btn", sel.DM_SEND_BTN_SELECTOR),
+                ]:
+                    try:
+                        el = page.locator(s).first
+                        cnt = await el.count()
+                        if cnt == 0:
+                            diag[name] = "absent"
+                            continue
+                        try:
+                            visible = await el.is_visible()
+                            box = await el.bounding_box()
+                            diag[name] = {
+                                "visible": visible,
+                                "w": int(box["width"]) if box else 0,
+                                "h": int(box["height"]) if box else 0,
+                            }
+                        except Exception as _e:
+                            diag[name] = f"present-noprobe({_e!r})"
+                    except Exception as _e:
+                        diag[name] = f"err({_e!r})"
+                try:
+                    cur_url = page.url
+                except Exception:
+                    cur_url = "?"
+                logger.warning(
+                    "[计时] 浮窗打开失败 %.1fs | URL=%s | click=%s | 候选探测=%s",
+                    t_popup - t_click, cur_url, click_method, diag,
+                )
                 # 抓页面 HTML 留证,供下一次排查 DOM 漂移 / 登录态 / 用户不可达
                 try:
                     from src.backend.utils.paths import get_data_path
