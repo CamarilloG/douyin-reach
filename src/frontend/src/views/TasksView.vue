@@ -200,7 +200,7 @@ import { ref, onMounted, h } from 'vue'
 import {
   NButton, NSpace, NDataTable, NModal, NForm, NFormItem, NInput, NInputNumber, NSwitch,
   NDynamicInput, NH4, NCollapse, NCollapseItem, NRadio, NRadioGroup, NScrollbar,
-  NList, NListItem, NText, useMessage,
+  NList, NListItem, NText, NTooltip, useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import { bridge, isApiAvailable } from '@/api/bridge'
@@ -257,6 +257,9 @@ const statusMap: Record<string, string> = {
   paused: '已暂停', completed: '已完成', error: '异常',
 }
 
+// 与后端 task/state.py 转换表对齐:允许 → collecting 的源状态
+const ALLOW_START_COLLECT = new Set(['pending', 'paused', 'collected', 'error'])
+
 const columns: DataTableColumns<Record<string, any>> = [
   { title: 'ID', key: 'id', width: 60 },
   { title: '任务名', key: 'name', width: 160 },
@@ -267,10 +270,32 @@ const columns: DataTableColumns<Record<string, any>> = [
     title: '操作', key: 'actions', width: 280,
     render: (row) => {
       const id = row.id as number
+      const status = (row.status as string) ?? ''
+      const canStart = ALLOW_START_COLLECT.has(status)
+      const startBtn = h(
+        NButton,
+        {
+          size: 'small',
+          type: 'primary',
+          disabled: !canStart,
+          onClick: canStart ? () => startCollect(id) : undefined,
+        },
+        { default: () => '启动' },
+      )
       return h(NSpace, { size: 6 }, () => [
         h(NButton, { size: 'small', onClick: () => edit(id) }, { default: () => '编辑' }),
         h(NButton, { size: 'small', onClick: () => duplicate(id) }, { default: () => '复制' }),
-        h(NButton, { size: 'small', type: 'primary', onClick: () => startCollect(id) }, { default: () => '启动' }),
+        canStart
+          ? startBtn
+          : h(
+              NTooltip,
+              { trigger: 'hover' },
+              {
+                trigger: () => startBtn,
+                default: () =>
+                  `当前状态「${statusMap[status] ?? status}」不允许启动采集；如需重采，请先复制为新任务。`,
+              },
+            ),
         h(NButton, { size: 'small', type: 'error', onClick: () => del(id) }, { default: () => '删除' }),
       ])
     },
