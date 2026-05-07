@@ -109,14 +109,6 @@ class Api:
         raise NotImplementedError
 
     # ---------- 系统与账号 ----------
-    def open_login_browser(self) -> bool:
-        """打开浏览器触发登录流程。"""
-        raise NotImplementedError
-
-    def check_login_status(self) -> dict[str, Any]:
-        """检查当前登录状态。"""
-        raise NotImplementedError
-
     def get_settings(self) -> dict[str, Any]:
         """获取全局设置。"""
         raise NotImplementedError

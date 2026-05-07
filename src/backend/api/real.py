@@ -4,10 +4,8 @@ M6 GUI 集成：默认使用，支持事件推送、导出对话框、登录与�
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import threading
 from typing import Any
 
 from .api import Api
@@ -487,75 +485,6 @@ class RealApi(Api):
         finally:
             conn.close()
         return path
-
-    def open_login_browser(self) -> bool:
-        """打开浏览器供用户登录抖音，成功后持久化 Cookie。"""
-        from src.backend.browser import BrowserEngine
-
-        _login_error: list[str] = []
-
-        def _run() -> None:
-            engine = BrowserEngine()
-            try:
-                asyncio.run(_do_login(engine))
-            except Exception as e:
-                _login_error.append(str(e))
-                logger.warning("登录浏览器启动异常: %s", e)
-
-        async def _do_login(eng) -> None:
-            await eng.launch()
-            try:
-                await eng.login()
-            finally:
-                await eng.close()
-
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        return True
-
-    def check_login_status(self) -> dict[str, Any]:
-        """检查当前 session 是否有效。不启动浏览器，仅用 request API 请求 user/settings。"""
-        from src.backend.browser import selectors as sel
-
-        result: dict[str, Any] = {"logged_in": False, "username": None, "expires_at": None}
-        from src.backend.utils.paths import get_data_path
-        storage_path = get_data_path("douyin_storage_state.json")
-
-        def _check() -> None:
-            try:
-                from playwright.sync_api import sync_playwright
-
-                with sync_playwright() as p:
-                    opts = {"base_url": "https://www.douyin.com"}
-                    if os.path.isfile(storage_path):
-                        opts["storage_state"] = storage_path
-                    ctx = p.request.new_context(**opts)
-                    try:
-                        resp = ctx.get(sel.USER_SETTINGS_API, timeout=15000)
-                        if resp.status != 200:
-                            result["error"] = f"HTTP {resp.status}"
-                            return
-                        body = resp.json()
-                        if isinstance(body, dict):
-                            if (body.get("user") is not None) or (body.get("user_id") is not None):
-                                result["logged_in"] = True
-                                result["username"] = "已登录"
-                    finally:
-                        ctx.dispose()
-            except Exception as e:
-                logger.warning("检查登录状态异常: %s", e)
-                result["error"] = str(e)
-
-        t = threading.Thread(target=_check, daemon=True)
-        t.start()
-        t.join(timeout=15)
-        if not t.is_alive() and not result["logged_in"] and "error" not in result:
-            # 线程正常结束但未登录，无异常 — 正常的未登录状态
-            pass
-        elif t.is_alive():
-            logger.warning("检查登录状态超时(15s)")
-            result["error"] = "检查超时"
-        return result
 
     def get_settings(self) -> dict[str, Any]:
         return _get_settings()

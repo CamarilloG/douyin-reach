@@ -181,17 +181,6 @@ export const bridge = {
   export_send_history: (task_id: number, file_path: string) =>
     callSafe('export_send_history', '', task_id, file_path),
 
-  // ==================== 浏览器控制 ====================
-
-  open_login_browser: () => callSafe('open_login_browser', false),
-
-  check_login_status: () =>
-    callSafe('check_login_status', {
-      logged_in: false,
-      username: null,
-      expires_at: null,
-    }),
-
   // ==================== 系统设置 ====================
 
   get_settings: async (): Promise<Settings> => {

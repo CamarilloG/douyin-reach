@@ -27,8 +27,6 @@ interface PyWebViewApi {
   get_send_progress: (task_id: number) => Promise<unknown | null>
   get_send_history: (task_id: number, page?: number, page_size?: number, status?: string | null) => Promise<{ items: unknown[]; total: number; page: number; page_size: number }>
   export_send_history: (task_id: number, file_path: string) => Promise<string>
-  open_login_browser: () => Promise<boolean>
-  check_login_status: () => Promise<{ logged_in: boolean; username?: string | null; expires_at?: string | null }>
   get_settings: () => Promise<Record<string, unknown>>
   update_settings: (data: Record<string, unknown>) => Promise<Record<string, unknown>>
 }
