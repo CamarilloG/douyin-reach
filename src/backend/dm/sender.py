@@ -90,15 +90,26 @@ class DMSender:
                     retryable=False,
                 )
 
-            # ========== 合并检测：新手引导 + 风控 + 私信按钮，单次 evaluate ==========
+            # body.cloneNode(true) 这种重操作绝不能在 store 直驱前调用 —— 实测它会同步
+            # 阻塞主线程几百 ms,期间 conversationStore 异步初始化时序错位,导致 trigger_via_store
+            # 拿到陈旧 store 或 wait_for_function 超时。对齐 _light_touch_main 的顺序后稳定性回升。
+            t_btn0 = time.monotonic()  # 给"按钮点击"[计时] 一个 fallback 基准（DOM 兜底里会重置）
+
+            # ========== 合并检测 helper（仅在 DOM 兜底路径里调用）==========
             # 按钮查找逻辑跟创作者通道 sender_creator._light_touch_main 对齐(2026-05 调研后修正):
             #   - 文本从 span.semi-button-content 精确取(Semi 设计系统类,稳定)
             #   - 黑名单 [data-e2e="im-entry"]: 顶栏的"私信"包装,click 后跳全局消息中心,不弹浮窗
             #   - 黑名单 [data-e2e="im-dialog"]: 浮窗内可能也有自引用的"私信"按钮
             #   - 可见性用 computed style 判,不用 offsetParent(fixed 定位会被误杀)
             #   - 诊断候选: 失败时附带所有命中"私信"文本的 button(含不可见+黑名单)+容器路径
-            t_btn0 = time.monotonic()
-            combined = await page.evaluate("""(args) => {
+            async def _run_dom_precheck() -> tuple[Optional[dict[str, Any]], Optional[SendResult]]:
+                """合并 evaluate (含 newbie 关闭 / 风控 / 验证码 / 私信按钮查找)。
+                返回 (combined_dict, fatal_result)。fatal_result 非 None 时调用方应直接 return。
+                注意 body.cloneNode(true) 是个重操作,会同步阻塞主线程几百 ms,因此**绝不能**
+                在 store 直驱前调用 (会让 conversationStore 异步初始化时序错位)。
+                """
+                _t0 = time.monotonic()
+                _combined = await page.evaluate("""(args) => {
                 const [dangerTexts, captchaSelectors, newbieText, userDetailSel] = args;
                 const result = {
                     newbieFound: false,
@@ -218,42 +229,42 @@ class DMSender:
                     result.pageSnippet = (document.body.innerText || '').slice(0, 500);
                 }
 
-                return result;
-            }""", [
-                list(sel.DANGER_PAGE_TEXTS),
-                list(sel.CAPTCHA_DOM_SELECTORS),
-                sel.NEWBIE_GUIDE_DISMISS_TEXT,
-                sel.USER_DETAIL_CONTAINER,
-            ])
-            logger.info("[计时] 合并检测 %.1fs | 新手引导=%s 风控=%s 验证码=%s 候选=%d 可见可选=%d",
-                        time.monotonic() - t_btn0,
-                        combined.get("newbieFound"),
-                        combined.get("dangerText"),
-                        combined.get("captchaSelector"),
-                        len(combined.get("diagCandidates", [])),
-                        len(combined.get("dmButtons", [])))
-
-            # 处理风控检测结果
-            if combined.get("dangerText"):
-                self._browser._risk_state.trigger_danger(
-                    f"页面出现危险文案: {combined['dangerText']} | snippet={combined.get('pageSnippet', '')}"
-                )
-                return SendResult(
-                    success=False,
-                    failure_type="technical",
-                    failure_reason="检测到验证码/风控浮层，请手动完成验证",
-                    retryable=True,
-                )
-            if combined.get("captchaSelector"):
-                self._browser._risk_state.trigger_danger(
-                    f"检测到验证码浮层: {combined['captchaSelector']}"
-                )
-                return SendResult(
-                    success=False,
-                    failure_type="technical",
-                    failure_reason="检测到验证码/风控浮层，请手动完成验证",
-                    retryable=True,
-                )
+                    return result;
+                }""", [
+                    list(sel.DANGER_PAGE_TEXTS),
+                    list(sel.CAPTCHA_DOM_SELECTORS),
+                    sel.NEWBIE_GUIDE_DISMISS_TEXT,
+                    sel.USER_DETAIL_CONTAINER,
+                ])
+                logger.info("[计时] 合并检测 %.1fs | 新手引导=%s 风控=%s 验证码=%s 候选=%d 可见可选=%d",
+                            time.monotonic() - _t0,
+                            _combined.get("newbieFound"),
+                            _combined.get("dangerText"),
+                            _combined.get("captchaSelector"),
+                            len(_combined.get("diagCandidates", [])),
+                            len(_combined.get("dmButtons", [])))
+                # 风控/验证码 → 致命结果
+                if _combined.get("dangerText"):
+                    self._browser._risk_state.trigger_danger(
+                        f"页面出现危险文案: {_combined['dangerText']} | snippet={_combined.get('pageSnippet', '')}"
+                    )
+                    return None, SendResult(
+                        success=False,
+                        failure_type="technical",
+                        failure_reason="检测到验证码/风控浮层，请手动完成验证",
+                        retryable=True,
+                    )
+                if _combined.get("captchaSelector"):
+                    self._browser._risk_state.trigger_danger(
+                        f"检测到验证码浮层: {_combined['captchaSelector']}"
+                    )
+                    return None, SendResult(
+                        success=False,
+                        failure_type="technical",
+                        failure_reason="检测到验证码/风控浮层，请手动完成验证",
+                        retryable=True,
+                    )
+                return _combined, None
 
             # ---------- 浮窗就绪等待器 (store 直驱与 DOM click 兜底两条路径共用) ----------
             _popup_selector = ", ".join([
@@ -304,6 +315,12 @@ class DMSender:
 
             # ---------- 兜底: DOM click (对齐创作者通道写法) ----------
             if not opened:
+                # 现在才做合并 evaluate (store 直驱失败时才付出 cloneNode 重操作的代价)
+                combined, fail_result = await _run_dom_precheck()
+                if fail_result is not None:
+                    return fail_result
+                assert combined is not None  # for type checkers
+                t_btn0 = time.monotonic()  # 给后续按钮点击 [计时] 一个准确基准
                 candidates_raw = combined.get("dmButtons", [])
                 diag_first = combined.get("diagCandidates", [])
 
