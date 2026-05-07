@@ -670,8 +670,64 @@ class DMSender:
                 await input_el.press("Enter")
                 send_method = "Enter键(按钮选择器丢失)"
             else:
-                await send_btn.click(timeout=3000)
-                send_method = "发送按钮"
+                # 发送按钮是 <svg>（调研报告 §Step 5 实测确认）。
+                # svg 上 Playwright Locator.click() 偶发不触发 React onClick —
+                # React 17+ 用根节点事件委托,svg 内部某些版本下事件不冒泡到正确委托节点。
+                # 调研报告用真鼠标在物理坐标 (1334, 606) 点击成功 → 我们用
+                # page.mouse.click(x, y) 物理坐标点击，最接近真鼠标行为。
+                # 失败时 fallback 到 dispatchEvent 三连（mousedown + mouseup + click）。
+                send_method = ""
+                try:
+                    box = await send_btn.bounding_box()
+                except Exception:
+                    box = None
+                clicked_via_mouse = False
+                if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    try:
+                        await send_btn.scroll_into_view_if_needed(timeout=1500)
+                    except Exception:
+                        pass
+                    try:
+                        await page.mouse.move(cx, cy)
+                        await asyncio.sleep(0.05)
+                        await page.mouse.click(cx, cy, delay=30)
+                        send_method = f"鼠标物理点击({int(cx)},{int(cy)})"
+                        clicked_via_mouse = True
+                    except Exception as e:
+                        logger.warning("page.mouse.click 失败: %s", e)
+                if not clicked_via_mouse:
+                    # fallback 1: Locator.click（带 actionability 检查的标准 click）
+                    try:
+                        await send_btn.click(timeout=3000)
+                        send_method = "Locator.click"
+                    except Exception as e:
+                        logger.warning("Locator.click 失败: %s", e)
+                        # fallback 2: JS dispatchEvent 三连（兼容 React onClick / onMouseDown 等）
+                        try:
+                            await page.evaluate(
+                                """(selector) => {
+                                    const el = document.querySelector(selector);
+                                    if (!el) return false;
+                                    // 部分组件事件绑在 svg 父元素 (button-like wrapper)
+                                    const target = el.closest('button, [role="button"]') || el.parentElement || el;
+                                    const fire = (type) => target.dispatchEvent(new MouseEvent(type, {
+                                        bubbles: true, cancelable: true, view: window,
+                                        button: 0, buttons: 1,
+                                    }));
+                                    fire('mousedown'); fire('mouseup'); fire('click');
+                                    if (typeof target.click === 'function') {
+                                        try { target.click(); } catch (_) {}
+                                    }
+                                    return true;
+                                }""",
+                                sel.DM_SEND_BTN_SELECTOR,
+                            )
+                            send_method = "dispatchEvent三连"
+                        except Exception as e2:
+                            logger.warning("dispatchEvent fallback 也失败: %s", e2)
+                            send_method = "全部失败"
             t_send = time.monotonic()
             logger.info("[计时] 输入+发送 %.1fs | 发送方式: %s | 消息长度: %d",
                         t_send - t_input0, send_method, len(message))
