@@ -619,10 +619,19 @@ class DMSender:
         needle = (sent_message or "").strip()
         needle_prefix = needle[:10] if len(needle) >= 10 else needle
 
-        # 失败短语分类：哪些是"业务限制不重试"，哪些是"技术失败可重试"
+        # 失败短语分类：哪些是"业务限制不重试"，哪些是"技术失败可重试"。
+        # 业务限制 = 即便重试 100 次结果一样（对方设置/拉黑/陌生人单条限制 / 敏感词 / 账号风控），
+        # 直接标 retryable=False 跳到下一个用户，省外层 retry_limit 的等待时间。
         BUSINESS_PHRASES = {
+            # 对方拒收 / 隐私 / 黑名单
             "对方设置了", "对方设置不接收", "对方拒绝接收",
             "无法向其发送", "陌生人消息已禁用", "已被对方拉黑", "已禁言",
+            # 陌生人单条限制（2026-05 实测：第二次起 WS 服务端拒收 stranger_one_msg_limit）
+            "不能再发送消息", "不能再发送",
+            # 敏感词 / 内容审核（text_block）
+            "内容违规", "包含敏感", "审核未通过",
+            # 账号风控（risk_user）— 重试也救不了，需要换号或人工解封
+            "账号存在异常",
         }
 
         _JS_DETECT = """(args) => {
@@ -662,7 +671,26 @@ class DMSender:
                 }
             }
 
-            // 3) 成功判定：浮窗内出现刚发送的文本（前缀也算）
+            // 3) 视觉失败信号：聊天区出现红色 ❗ 图标（class 含 error/failed/warning/danger）。
+            // 调研发现：陌生人单条限制等服务端拒收场景下，气泡左侧会渲染红 ❗ —
+            // 客户端乐观渲染会让 needle 命中浮窗 innerText（成功假象），但红 ❗ 不会变。
+            // 必须先于 needle 命中检测。
+            const errIcon = popup.querySelector(
+                '[class*="msg-error"], [class*="MsgError"], [class*="message-error"],' +
+                '[class*="send-fail"], [class*="SendFail"], [class*="msg-fail"],' +
+                'svg[class*="error"], svg[class*="Error"], svg[class*="warning"]'
+            );
+            if (errIcon) {
+                const r = errIcon.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) {
+                    out.result = 'fail';
+                    out.reason = 'icon';
+                    out.hit = (errIcon.getAttribute('class') || '').slice(0, 80);
+                    return out;
+                }
+            }
+
+            // 4) 成功判定：浮窗内出现刚发送的文本（前缀也算）
             if (needle && (popupText.includes(needle) || (prefix && popupText.includes(prefix)))) {
                 out.result = 'success';
                 return out;

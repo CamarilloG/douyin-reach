@@ -127,20 +127,23 @@ USER_PAGE_DM_BUTTON_SELECTOR = 'button.semi-button:has-text("私信"):visible'
 USER_DETAIL_CONTAINER = '[data-e2e="user-detail"]'
 
 # ---------- 私信叠层（M5 DOM 发送）---------
-# 真实 DOM 结构（已在登录态页面验证，2026-04）：
+# 真实 DOM 结构（2026-05 实测确认，docs/网络请求调研.txt 报告）：
 #   [data-e2e="im-entry"]
-#     └─ .lGxh4PDP.popShadowAnimation        ← 浮窗根（hash class 不稳定）
+#     └─ .messageMsgInputcontainer / .popShadowAnimation 等浮窗根（hash class 不稳定）
 #         ├─ [data-e2e="im-dialog"]          ← 左侧会话列表面板（不是聊天区！）
 #         └─ [data-e2e="msg-input"]          ← 右侧聊天输入区容器（稳定锚点）
-#             ├─ .im-richtext-container
-#             │   └─ .DraftEditor-editorContainer
-#             │       └─ div[role="textbox" contenteditable="true"].public-DraftEditor-content
-#             └─ span.PygT7Ced.e2e-send-msg-btn  ← 发送按钮（<span>，无 disabled）
+#             ├─ .messageMsgInputinputColumn
+#             │   └─ .messageEditorimChatEditorContainer
+#             │       └─ div[data-slate-editor="true"][contenteditable="true"][data-placeholder="发送消息"]
+#             │              ← Slate.js 编辑器（早期版本是 DraftJS，2026-05 已迁移到 Slate）
+#             └─ <svg class="messageMsgInputpublishBtn ... e2e-send-msg-btn">
+#                    ← 发送按钮是 <svg>（不是 <span>），输入非空时加 messageMsgInputpublishRedBtn 类变红
 #
 # 关键事实：
-# - 全页面只有一个 role="textbox"，就是私信输入框（搜索框是 <input data-e2e="searchbar-input">）
-# - 搜索框是原生 <input>，私信框是 DraftJS contenteditable，DOM 类型上天然互斥
-# - 输入框本身没有 data-e2e / aria-label，但它的祖先 [data-e2e="msg-input"] 是稳定锚点
+# - 输入框是 Slate.js 的 contenteditable div（data-slate-editor="true" 是 Slate 标识）
+# - 输入后内部结构：<div class="ace-line"><span data-string="true" data-leaf="true">文本</span></div>
+# - 搜索框是 <input data-e2e="searchbar-input">，DOM 类型与私信框天然互斥
+# - 输入框本身没有 data-e2e，靠祖先 [data-e2e="msg-input"] 锚定
 
 # ⚠️ im-entry 是顶部导航栏消息入口（点它进全局消息中心），**不是**主页私信浮窗。
 # 之前把它当浮窗锚点是错的 — 浮窗打开后真正新增的是 [data-e2e="im-dialog"]。
@@ -151,32 +154,42 @@ DM_DIALOG_SELECTOR = '[data-e2e="im-dialog"]'
 DM_MSG_INPUT_CONTAINER = '[data-e2e="msg-input"]'
 # 输入框（1 级选择器，100% 命中率）
 DM_INPUT_SELECTOR = '[data-e2e="msg-input"] [contenteditable="true"]'
-# 备用：DraftJS richtext 容器路径
-DM_INPUT_SELECTOR_ALT = '.im-richtext-container [contenteditable="true"]'
+# 备用 Slate.js 编辑器锚点（data-slate-editor 是 Slate 框架标识，比类名稳定）
+DM_INPUT_SELECTOR_ALT = '[data-e2e="msg-input"] div[data-slate-editor="true"]'
 # 发送按钮（1 级选择器，含容器限定）
 DM_SEND_BTN_SELECTOR = '[data-e2e="msg-input"] .e2e-send-msg-btn'
 # 发送按钮 class（备用，全局唯一）
 DM_SEND_BTN_CLASS = "e2e-send-msg-btn"
-# 输入框 placeholder 文案（仅作文案展示用途，DraftJS 不使用原生 placeholder）
+# 输入框 placeholder 文案（Slate.js 用 data-placeholder 属性渲染）
 DM_INPUT_DESC = "发送消息"
 # 发送失败 / 业务限制文案（用于检测失败）
 DM_FAIL_SEND = "发送失败"
 DM_ONE_MSG_LIMIT = "只能发送一条"
 # 私信发送后失败相关的文案集合（命中任一即视为失败）。
 # 涵盖：技术失败 / 风控限速 / 对方拒收 / 黑名单 / 上限 / 风险验证。
-# 注意保持短语足够具体，避免被静态提示"只能发送一条"误命中。
+#
+# ⚠️ 重要陷阱：抖音 PC 端是「客户端乐观渲染 + 服务端 WS 拒收」，
+# 失败时气泡仍会渲染并包含 needle 文本，仅在气泡左侧加红 ❗ 图标 +
+# 气泡下方追加文案。所以必须扫描以下短语来识别真实失败状态。
+#
+# ⚠️ 易混淆陷阱：「只能发送一条文字消息」是浮窗内静态提示（正常成功也有），
+# 「不能再发送消息给对方」才是失败标志。两者只差一个"再"字 —— 必须用完整词组匹配，
+# 不能用"对方回复或关注"做模糊匹配。
 DM_FAIL_PHRASES = (
     "发送失败",
+    # 风控限速
     "操作太频繁",
     "操作过于频繁",
     "请稍后再试",
     "请稍后",
     "频率过高",
+    # 上限
     "今日发送次数",
     "今天发送次数",
     "私信次数已达上限",
     "私信已达上限",
     "已达上限",
+    # 对方拒收 / 隐私设置
     "对方设置了",
     "对方设置不接收",
     "对方拒绝接收",
@@ -184,9 +197,21 @@ DM_FAIL_PHRASES = (
     "陌生人消息已禁用",
     "已被对方拉黑",
     "已禁言",
+    # 陌生人单条限制（2026-05 实测确认 — 第二次起的服务端 WS 拒收，
+    # `cant_chat_reason: stranger_one_msg_limit`，气泡下方追加该文案）
+    "不能再发送消息",
+    "不能再发送",
+    # 敏感词 / 内容审核（text_block）
+    "内容违规",
+    "包含敏感",
+    "审核未通过",
+    # 账号风控（risk_user）
     "存在风险",
     "请完成安全验证",
+    "账号存在异常",
+    # 网络
     "网络异常",
+    "网络繁忙",
 )
 # 抖音/Semi Design 的红字 toast 选择器（私信失败时通常 portal 到 body）
 DM_TOAST_ERROR_SELECTORS = (
