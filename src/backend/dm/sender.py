@@ -662,72 +662,106 @@ class DMSender:
                     retryable=True,
                 )
 
-            send_btn = page.locator(sel.DM_SEND_BTN_SELECTOR).first
-            if await send_btn.count() == 0:
-                send_btn = page.locator(f'.{sel.DM_SEND_BTN_CLASS}').first
-            if await send_btn.count() == 0:
-                # 按钮激活但 selector 找不到（理论上不应该发生）→ Enter 兜底
-                await input_el.press("Enter")
-                send_method = "Enter键(按钮选择器丢失)"
+            # 完全走 JS 路径（不依赖物理鼠标坐标 / viewport 大小）。
+            # 调研发现 svg.e2e-send-msg-btn 自身就有 onclick handler (hasOnClick=true),
+            # 所以不必担心事件委托 / React 合成事件, 直接在 JS 里调 svg.click() 等价
+            # 真鼠标 click 走完整事件链。多种触发方法逐一尝试，任一成功即可：
+            #   1) 直接调 el.onclick(event) — 如果 onclick 是函数，绕过事件系统直接调
+            #   2) el.click() — DOM 标准方法，等价用户真点击的事件链
+            #   3) 完整 PointerEvent + MouseEvent 链 (pointerdown→mousedown→pointerup→mouseup→click)
+            #   4) React 内部 fiber 上找 onClick prop 调用 (兜底，覆盖 React 合成事件场景)
+            click_result = await page.evaluate(
+                """(selector) => {
+                    const el = document.querySelector(selector);
+                    if (!el) return { ok: false, reason: 'not-found', methods: [] };
+                    const result = { ok: false, methods: [], errors: [] };
+
+                    // 1) 直接调 el.onclick — 如果是函数就执行它
+                    try {
+                        if (typeof el.onclick === 'function') {
+                            const evt = new MouseEvent('click', {
+                                bubbles: true, cancelable: true, view: window,
+                                button: 0, detail: 1,
+                            });
+                            el.onclick.call(el, evt);
+                            result.methods.push('onclick-direct');
+                            result.ok = true;
+                        }
+                    } catch (e) {
+                        result.errors.push('onclick:' + (e && e.message || e));
+                    }
+
+                    // 2) DOM 标准 el.click() — 触发完整事件链 + 默认行为
+                    try {
+                        if (typeof el.click === 'function') {
+                            el.click();
+                            result.methods.push('el.click');
+                            result.ok = true;
+                        }
+                    } catch (e) {
+                        result.errors.push('el.click:' + (e && e.message || e));
+                    }
+
+                    // 3) 完整 Pointer + Mouse 事件链 (现代 React 监听 pointerdown/up,
+                    //    Chrome 真鼠标点击就是这一套)
+                    try {
+                        const target = el.closest('button, [role="button"]') || el;
+                        const baseInit = {
+                            bubbles: true, cancelable: true, view: window,
+                            button: 0, buttons: 0, detail: 1,
+                            clientX: 0, clientY: 0,  // viewport 坐标无所谓,事件仍会冒泡
+                        };
+                        const ptrInit = Object.assign({}, baseInit, {
+                            pointerType: 'mouse', isPrimary: true, pointerId: 1,
+                        });
+                        target.dispatchEvent(new PointerEvent('pointerdown',
+                            Object.assign({}, ptrInit, { buttons: 1 })));
+                        target.dispatchEvent(new MouseEvent('mousedown',
+                            Object.assign({}, baseInit, { buttons: 1 })));
+                        target.dispatchEvent(new PointerEvent('pointerup', ptrInit));
+                        target.dispatchEvent(new MouseEvent('mouseup', baseInit));
+                        target.dispatchEvent(new MouseEvent('click', baseInit));
+                        result.methods.push('full-event-chain');
+                        result.ok = true;
+                    } catch (e) {
+                        result.errors.push('chain:' + (e && e.message || e));
+                    }
+
+                    // 4) React fiber 内部 onClick prop 兜底
+                    try {
+                        const fiberKey = Object.keys(el).find(k => k.startsWith('__reactProps$') || k.startsWith('__reactInternalInstance'));
+                        if (fiberKey) {
+                            const props = el[fiberKey];
+                            if (props && typeof props.onClick === 'function') {
+                                props.onClick({
+                                    type: 'click', target: el, currentTarget: el,
+                                    preventDefault(){}, stopPropagation(){},
+                                    nativeEvent: { button: 0 },
+                                });
+                                result.methods.push('react-onclick-prop');
+                                result.ok = true;
+                            }
+                        }
+                    } catch (e) {
+                        result.errors.push('react:' + (e && e.message || e));
+                    }
+                    return result;
+                }""",
+                sel.DM_SEND_BTN_SELECTOR,
+            )
+            if isinstance(click_result, dict) and click_result.get("ok"):
+                send_method = "JS:" + ",".join(click_result.get("methods") or [])
+                if click_result.get("errors"):
+                    logger.info("[主站] click 部分方法报错（不影响整体）: %s", click_result["errors"])
             else:
-                # 发送按钮是 <svg>（调研报告 §Step 5 实测确认）。
-                # svg 上 Playwright Locator.click() 偶发不触发 React onClick —
-                # React 17+ 用根节点事件委托,svg 内部某些版本下事件不冒泡到正确委托节点。
-                # 调研报告用真鼠标在物理坐标 (1334, 606) 点击成功 → 我们用
-                # page.mouse.click(x, y) 物理坐标点击，最接近真鼠标行为。
-                # 失败时 fallback 到 dispatchEvent 三连（mousedown + mouseup + click）。
-                send_method = ""
+                logger.warning("[主站] JS click 全部失败: %s", click_result)
+                send_method = f"JS-failed({(click_result or {}).get('reason')})"
+                # 最后兜底：Enter 键
                 try:
-                    box = await send_btn.bounding_box()
+                    await input_el.press("Enter")
+                    send_method += " → Enter键"
                 except Exception:
-                    box = None
-                clicked_via_mouse = False
-                if box and box.get("width", 0) > 0 and box.get("height", 0) > 0:
-                    cx = box["x"] + box["width"] / 2
-                    cy = box["y"] + box["height"] / 2
-                    try:
-                        await send_btn.scroll_into_view_if_needed(timeout=1500)
-                    except Exception:
-                        pass
-                    try:
-                        await page.mouse.move(cx, cy)
-                        await asyncio.sleep(0.05)
-                        await page.mouse.click(cx, cy, delay=30)
-                        send_method = f"鼠标物理点击({int(cx)},{int(cy)})"
-                        clicked_via_mouse = True
-                    except Exception as e:
-                        logger.warning("page.mouse.click 失败: %s", e)
-                if not clicked_via_mouse:
-                    # fallback 1: Locator.click（带 actionability 检查的标准 click）
-                    try:
-                        await send_btn.click(timeout=3000)
-                        send_method = "Locator.click"
-                    except Exception as e:
-                        logger.warning("Locator.click 失败: %s", e)
-                        # fallback 2: JS dispatchEvent 三连（兼容 React onClick / onMouseDown 等）
-                        try:
-                            await page.evaluate(
-                                """(selector) => {
-                                    const el = document.querySelector(selector);
-                                    if (!el) return false;
-                                    // 部分组件事件绑在 svg 父元素 (button-like wrapper)
-                                    const target = el.closest('button, [role="button"]') || el.parentElement || el;
-                                    const fire = (type) => target.dispatchEvent(new MouseEvent(type, {
-                                        bubbles: true, cancelable: true, view: window,
-                                        button: 0, buttons: 1,
-                                    }));
-                                    fire('mousedown'); fire('mouseup'); fire('click');
-                                    if (typeof target.click === 'function') {
-                                        try { target.click(); } catch (_) {}
-                                    }
-                                    return true;
-                                }""",
-                                sel.DM_SEND_BTN_SELECTOR,
-                            )
-                            send_method = "dispatchEvent三连"
-                        except Exception as e2:
-                            logger.warning("dispatchEvent fallback 也失败: %s", e2)
-                            send_method = "全部失败"
+                    pass
             t_send = time.monotonic()
             logger.info("[计时] 输入+发送 %.1fs | 发送方式: %s | 消息长度: %d",
                         t_send - t_input0, send_method, len(message))
