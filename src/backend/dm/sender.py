@@ -618,27 +618,19 @@ class DMSender:
                 )
             await asyncio.sleep(0.3)
 
-            # 等发送按钮"激活" — 实地浏览器调研发现：
-            # 抖音主站发送按钮有两种 UI（A/B 灰度并存）：
-            #   1) 新 UI: <svg class="messageMsgInputpublishBtn e2e-send-msg-btn">
-            #   2) 旧 UI: <span class="PygT7Ced ... e2e-send-msg-btn"><svg><path fill="#fff" fill-opacity=".34">
-            # **两种 UI 的"激活/禁用"信号都在 path 的 fill 和 fill-opacity 上,
-            #   不在 class 里**。未激活: fill=#fff + opacity=0.34; 激活: fill=#FE2C55 + opacity=1.
-            # 之前用 class 包含 "Red/Active/Enabled" 判定永远命中不了 → wait timeout。
+            # 等发送按钮"激活" — 实地浏览器 inspect 后的最终结论 (2026-05):
+            # 抖音用户主页弹出的私信浮窗发送按钮 (svg 或 span 包 svg, A/B 灰度),
+            # **激活信号是整个元素的 CSS opacity 值** — 未激活 opacity:0.3, 激活 opacity:1。
+            # path.fill 一直是 #FE2C55 (红圆) 不变化, class 名在两种 UI 下不同 (有的加
+            # publishRedBtn, 有的不加), 都不可靠。CSS opacity 是抖音两个 UI 共用的统一信号。
             send_method = "unknown"
             try:
                 await page.wait_for_function(
                     """(selector) => {
                         const btn = document.querySelector(selector);
                         if (!btn) return false;
-                        const svg = btn.tagName.toLowerCase() === 'svg' ? btn : btn.querySelector('svg');
-                        if (!svg) return false;
-                        const path = svg.querySelector('path');
-                        if (!path) return false;
-                        const fill = ((path.getAttribute('fill') || '') + '').toLowerCase().replace(/^#/, '');
-                        const opacity = parseFloat(path.getAttribute('fill-opacity') || '1');
-                        // 激活: fill 是抖音红 (FE2C55) 且 fill-opacity >= 0.9
-                        return fill === 'fe2c55' && opacity >= 0.9;
+                        const op = parseFloat(window.getComputedStyle(btn).opacity || '1');
+                        return op >= 0.9;
                     }""",
                     arg=sel.DM_SEND_BTN_SELECTOR,
                     timeout=5000,
@@ -646,26 +638,27 @@ class DMSender:
                 send_btn_ready = True
             except Exception:
                 send_btn_ready = False
-                # 抓当前 path 状态写到日志
                 try:
                     state = await page.evaluate(
                         """(selector) => {
                             const btn = document.querySelector(selector);
                             if (!btn) return 'no-btn';
-                            const svg = btn.tagName.toLowerCase() === 'svg' ? btn : btn.querySelector('svg');
-                            const path = svg ? svg.querySelector('path') : null;
+                            const cs = window.getComputedStyle(btn);
+                            const editor = document.querySelector('[data-e2e="msg-input"] [contenteditable="true"]');
                             return {
                                 tag: btn.tagName.toLowerCase(),
                                 btnClass: (btn.getAttribute('class')||'').slice(0, 80),
-                                pathFill: path ? path.getAttribute('fill') : null,
-                                pathOpacity: path ? path.getAttribute('fill-opacity') : null,
+                                cssOpacity: cs.opacity,
+                                cssCursor: cs.cursor,
+                                cssPointerEvents: cs.pointerEvents,
+                                editorText: editor ? (editor.innerText||'').slice(0, 30) : null,
                             };
                         }""",
                         sel.DM_SEND_BTN_SELECTOR,
                     )
                 except Exception:
                     state = "?"
-                logger.warning("[主站] 发送按钮 5s 未激活 | path 状态=%s", state)
+                logger.warning("[主站] 发送按钮 5s 未激活 | 状态=%s", state)
 
             # 按钮未激活 = Slate 内部 model 仍为空 = 服务端发送是 no-op。
             # 强点 click 灰色按钮也不会真发出去,反而消耗时间 + 干扰外层 retry 判断。
