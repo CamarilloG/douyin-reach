@@ -99,9 +99,11 @@ def run_collection(task_id: int) -> bool:
             # 唯一释放点:绑定到后台线程生命周期,避免新任务在旧浏览器收尾期间抢占
             release_collecting(task_id)
 
+    # 先写状态再启动线程:若线程的快速路径(如无关键词)先把状态置为 collected,
+    # 这里再写 collecting 会把任务覆盖成"采集中"假状态
+    set_task_status(task_id, TaskStatus.collecting.value)
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
-    set_task_status(task_id, TaskStatus.collecting.value)
     return True
 
 
@@ -142,6 +144,7 @@ async def _run_collection_async(task_id: int) -> None:
     engine = BrowserEngine()
     danger_triggered: dict[str, bool] = {"stop": False}
     naturally_finished = False  # 是否走到了关键词全循环结束的"自然完成"分支
+    auto_send_ready = False  # 自然完成且自动筛选命中>0且开启 auto_send → 收尾后自动启动发送
 
     def _on_danger(reason: str) -> None:
         danger_triggered["stop"] = True
@@ -192,6 +195,7 @@ async def _run_collection_async(task_id: int) -> None:
                 seen_aweme_this_kw: set[str] = set()
                 scroll_attempts = 0
                 v_idx = 0
+                abort_keyword = False  # 返回搜索页失败且重搜失败 → 放弃本关键词
 
                 while scroll_attempts < max_scrolls_per_kw:
                     if _task_status(task_id) != TaskStatus.collecting.value:
@@ -311,8 +315,11 @@ async def _run_collection_async(task_id: int) -> None:
                                 return
                             if not recover:
                                 crud.log_insert(conn, task_id, "warning", "pipeline", f"重搜 {keyword} 失败,跳到下一关键词")
-                                break  # 跳出 while scroll_attempts, 进入下一个关键词
+                                abort_keyword = True
+                                break  # 先跳出 for videos, 再由 abort_keyword 跳出 while
 
+                    if abort_keyword:
+                        break
                     if not processed_any and len(seen_aweme_this_kw) >= max_videos_per_kw:
                         break
                     await engine.scroll_search_results_to_load_more()
@@ -415,27 +422,35 @@ async def _run_collection_async(task_id: int) -> None:
                     )
 
         debug_step.step("pipeline_done", "采集完成或中途暂停/停止")
-        # 走到这里说明 for-keywords 自然结束(没有 early return)
+        # 走到这里说明 for-keywords 自然结束(没有 early return)。
+        # 全自动链路(筛选→发送)只挂在这条自然完成路径上:
+        # 手动停止/风控/异常都是 early return,不会触发任何自动环节。
         naturally_finished = True
         status_now = _task_status(task_id)
         if status_now == TaskStatus.collecting.value:
             set_task_status(task_id, TaskStatus.collected.value)
+            # 配置以 DB 当前值为准(采集期间任务可能被编辑过)
+            task_now = crud.task_get(conn, task_id) or {}
             # 自动筛选：如果任务开启了 filter_enabled，采集完成后自动执行 run_filter
-            if task.get("filter_enabled"):
+            if task_now.get("filter_enabled"):
                 try:
                     from src.backend.filter.engine import run_filter as _run_filter
                     ok, count = _run_filter(task_id)
                     if ok:
-                        c3 = _conn()
-                        try:
-                            crud.log_insert(c3, task_id, "info", "pipeline", f"自动筛选完成，命中 {count} 人")
-                        finally:
-                            c3.close()
+                        crud.log_insert(conn, task_id, "info", "pipeline", f"自动筛选完成，命中 {count} 人")
                         logger.info("任务 %s 自动筛选完成，命中 %d 人", task_id, count)
+                        if task_now.get("auto_send"):
+                            if count > 0:
+                                auto_send_ready = True
+                            else:
+                                crud.log_insert(conn, task_id, "info", "pipeline", "自动筛选命中 0 人，跳过自动发送")
                     else:
                         logger.warning("任务 %s 自动筛选执行失败", task_id)
                 except Exception as e:
                     logger.warning("任务 %s 自动筛选异常: %s", task_id, e)
+            elif task_now.get("auto_send"):
+                crud.log_insert(conn, task_id, "info", "pipeline",
+                                "已开启全自动发送但未启用自动筛选，无法自动生成名单，请手动筛选后启动发送")
     finally:
         # 写入 execution 终态: 区分自然完成 / 用户停止 / 风控失败 / 异常
         try:
@@ -481,6 +496,24 @@ async def _run_collection_async(task_id: int) -> None:
                 logger.exception("采集流水线收尾异常: %s", e)
         finally:
             conn.close()
+
+    # 全自动发送：必须放在 try/finally 之后 —— 此时采集浏览器已关闭、execution 已收尾，
+    # 且只有自然完成路径能执行到这里(所有 early return 都不经过 finally 之后的代码)。
+    if auto_send_ready:
+        from .send_pipeline import run_sending
+        c4 = _conn()
+        try:
+            crud.log_insert(c4, task_id, "info", "pipeline", "已开启全自动发送，自动启动发送流水线")
+        finally:
+            c4.close()
+        if not run_sending(task_id):
+            logger.warning("任务 %s 自动启动发送失败（状态不允许或已有任务在发送中）", task_id)
+            c4 = _conn()
+            try:
+                crud.log_insert(c4, task_id, "warning", "pipeline",
+                                "自动启动发送失败：状态不允许或已有其他任务在发送中，请手动启动发送")
+            finally:
+                c4.close()
 
 
 def pause_collection(task_id: int) -> bool:

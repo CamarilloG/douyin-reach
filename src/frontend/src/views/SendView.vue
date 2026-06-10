@@ -44,14 +44,6 @@
             </n-form-item>
           </n-gi>
         </n-grid>
-        <n-form-item label="发送通道">
-          <n-radio-group v-model:value="params.dm_channel">
-            <n-space>
-              <n-radio value="main">主站私信</n-radio>
-              <n-radio value="creator">创作者中心（审核宽松，可发微信号/链接）</n-radio>
-            </n-space>
-          </n-radio-group>
-        </n-form-item>
       </n-form>
     </n-card>
 
@@ -84,7 +76,7 @@ import { ref, onMounted, onUnmounted, reactive, watch } from 'vue'
 import {
   NCard, NSpace, NButton, NStatistic, NGrid, NGi, NSelect, NH4,
   NDynamicInput, NInput, NInputNumber, NForm, NFormItem, NText,
-  NRadio, NRadioGroup, useMessage,
+  useMessage,
 } from 'naive-ui'
 import { bridge, isApiAvailable } from '@/api/bridge'
 import { useTaskContext } from '@/stores/taskContext'
@@ -101,7 +93,6 @@ const params = reactive({
   send_interval: 30,
   daily_limit: 100,
   retry_limit: 2,
-  dm_channel: 'main' as 'main' | 'creator',
 })
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
@@ -121,7 +112,6 @@ async function loadTaskDetail() {
     params.send_interval = Number(t.send_interval) || 30
     params.daily_limit = Number(t.daily_limit) || 100
     params.retry_limit = Number(t.retry_limit ?? 2)
-    params.dm_channel = (t.dm_channel === 'creator' ? 'creator' : 'main')
   } catch (e) {
     console.error(e)
   }
@@ -187,7 +177,6 @@ async function saveTemplate(silent: boolean = false) {
       send_interval: params.send_interval,
       daily_limit: params.daily_limit,
       retry_limit: params.retry_limit,
-      dm_channel: params.dm_channel,
     })
     if (!silent) message.success('已保存')
   } catch (e) {

@@ -281,7 +281,6 @@ class DMSender:
                     return False
 
             # ---------- 首选: store 直驱 (零 DOM,省 5-15s/条) ----------
-            # 与创作者通道 _light_touch_main 同款机制 (dm/_store_trigger.py)。
             # 直接调 window.conversationStore.setCurConversation 触发浮窗,
             # 跳过 "找按钮 → scroll → click → 失败重试 click" 整段链路,且抗按钮 hash 漂移。
             # 失败自动回落 DOM click 路径,fail-closed 行为完全不变。
@@ -289,10 +288,10 @@ class DMSender:
             click_method = "skip(store_direct)"
             t_store0 = time.monotonic()
             opened = False
-            # store 直驱后浮窗"已可交互"判定 = 共用 wait_popup_ready (创作者通道实测稳定):
+            # store 直驱后浮窗"已可交互"判定 = wait_popup_ready 两道闸:
             #   闸 1: [data-e2e="im-dialog"] boundingClientRect > 100×100 (外壳撑开)
-            #   闸 2: 浮窗 innerText 包含 "只能发送一条" (内部组件 mount 完成),
-            #         捕获不到则固定 2s 缓冲 (老会话不会有此提示)
+            #   闸 2: "只能发送一条"提示 OR 输入框中心点 hit-test 命中(无遮罩) 竞速,
+            #         两个信号都没等到才回落固定缓冲
             # 之前漏抄闸 2 时,实测 input_el.click(3000ms) 在浮窗"半就绪"状态下 timeout。
             store_ok, store_err = await trigger_via_store(page, sec_uid)
             if store_ok:
@@ -468,20 +467,27 @@ class DMSender:
 
             t_popup = time.monotonic()
             if opened:
-                # 检测实际匹配到哪个选择器
+                # 检测实际匹配到哪个选择器(纯诊断日志,单次 evaluate 避免多次 CDP 往返)
                 matched_sel = "unknown"
-                for name, s in [
-                    ("DM_INPUT_SELECTOR", sel.DM_INPUT_SELECTOR),
-                    ("DM_INPUT_SELECTOR_ALT", sel.DM_INPUT_SELECTOR_ALT),
-                    ("DM_ENTRY+MSG_INPUT", sel.DM_ENTRY_SELECTOR + " " + sel.DM_MSG_INPUT_CONTAINER),
-                ]:
-                    try:
-                        el = page.locator(s).first
-                        if await el.count() > 0 and await el.is_visible():
-                            matched_sel = name
-                            break
-                    except Exception:
-                        continue
+                try:
+                    matched_sel = await page.evaluate(
+                        """(pairs) => {
+                            for (const [name, s] of pairs) {
+                                const el = document.querySelector(s);
+                                if (!el) continue;
+                                const r = el.getBoundingClientRect();
+                                if (r.width > 0 && r.height > 0) return name;
+                            }
+                            return 'unknown';
+                        }""",
+                        [
+                            ["DM_INPUT_SELECTOR", sel.DM_INPUT_SELECTOR],
+                            ["DM_INPUT_SELECTOR_ALT", sel.DM_INPUT_SELECTOR_ALT],
+                            ["DM_ENTRY+MSG_INPUT", sel.DM_ENTRY_SELECTOR + " " + sel.DM_MSG_INPUT_CONTAINER],
+                        ],
+                    )
+                except Exception:
+                    pass
                 logger.info("[计时] 浮窗打开 %.1fs | 途径: %s | 匹配选择器: %s | 按钮点击方式: %s",
                             t_popup - t_click, popup_method, matched_sel, click_method)
             else:

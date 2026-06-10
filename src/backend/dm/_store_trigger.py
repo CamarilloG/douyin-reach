@@ -1,16 +1,13 @@
-"""主站私信浮窗的 store 直驱触发（共用工具）。
+"""主站私信浮窗的 store 直驱触发。
 
 背景（2026-04-21 调研，docs/DOM调研.txt）：
 抖音主站用户页挂载了 MobX 的 `window.conversationStore`，点击「私信」按钮的
 唯一可观测副作用是 `setCurConversation("0:1:<min>:<max>")`。只要拿到
-`from_uid` / `to_uid`，就能直接调 store 触发浮窗挂载，**完全不走 DOM**。
-
-适用场景：
-- 主站 DMSender：跳过"找按钮 → scroll → click → 重试 click"链路，省 5–15s/条
-- 创作者 CreatorDMSender 的 _light_touch_main：同上，仅做"轻触发"
+`from_uid` / `to_uid`，就能直接调 store 触发浮窗挂载，**完全不走 DOM**，
+跳过"找按钮 → scroll → click → 重试 click"链路，省 5–15s/条。
 
 成功仅代表 setCurConversation 被调成功，**不代表浮窗已展开**。展开判定见
-`wait_popup_ready()` —— 必须用两道闸（容器尺寸 + 系统提示文字），否则会出现
+`wait_popup_ready()` —— 必须用两道闸（容器尺寸 + 可交互信号），否则会出现
 "selector visible 命中但内部组件还在异步 mount" 的 false positive。
 """
 from __future__ import annotations
@@ -125,13 +122,19 @@ async def wait_popup_ready(
     hint_timeout: int = 2000,
     fallback_buffer_s: float = 2.0,
 ) -> bool:
-    """store 直驱后等浮窗"真正可交互"——与创作者通道 _wait_dialog_and_hint 同款两道闸。
+    """store 直驱后等浮窗"真正可交互"——两道闸。
 
     1) 容器尺寸闸：[data-e2e="im-dialog"] 的 boundingClientRect width/height > 100。
        必要不充分:外壳撑开 ≠ 内部组件 mount 完。
-    2) 系统提示文字闸:浮窗 innerText 包含 "只能发送一条"(陌生人会话必出)。
-       这是浮窗内部组件 mount 完成的可靠信号。捕获不到则给固定 2s 缓冲(老会话/
-       熟人会话不会有"只能发送一条"提示)。
+    2) 可交互闸(两个信号竞速,谁先到用谁):
+       A. 系统提示文字:浮窗 innerText 包含 "只能发送一条"(陌生人首聊必出)。
+          注意 im-dialog 实测是浮窗左侧会话列表(2026-04 调研),提示文字在右侧
+          聊天区,可能不在其 innerText 范围内 —— 所以不能只靠这一个信号,
+          否则老会话/作用域不符时每条都白等 hint_timeout + fallback(≈8s)。
+       B. 聊天输入框 hit-test:输入框已挂载、有尺寸,且其中心点 elementFromPoint
+          命中自身(无加载遮罩覆盖) —— 等效于"click 能落到输入框上",这正是
+          调用方下一步要做的动作,是最直接的就绪信号。
+       两个信号都没等到才回落固定缓冲(浮窗结构异常的罕见场景)。
 
     返回 True 仅当容器尺寸闸通过(尺寸不达标返回 False,调用方应回落 DOM click)。
     传 expand_timeout=0 跳过闸 1(浮窗已通过 click 路径打开,尺寸已经 OK 的场景)。
@@ -152,20 +155,32 @@ async def wait_popup_ready(
         except Exception:
             return False
 
-    # 闸 2:系统提示文字 / 固定缓冲
+    # 闸 2:提示文字 OR 输入框可点击,竞速
     try:
         await page.wait_for_function(
             """(args) => {
-                const [dialogSel, keyword] = args;
-                const c = document.querySelector(dialogSel);
-                if (!c) return false;
-                return (c.innerText || '').includes(keyword);
+                const [dialogSel, keyword, editorSels] = args;
+                const d = document.querySelector(dialogSel);
+                if (d && (d.innerText || '').includes(keyword)) return true;
+                for (const s of editorSels) {
+                    const el = document.querySelector(s);
+                    if (!el) continue;
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) continue;
+                    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+                    if (hit && (el.contains(hit) || hit.contains(el))) return true;
+                }
+                return false;
             }""",
-            arg=[sel.DM_DIALOG_SELECTOR, sel.DM_ONE_MSG_LIMIT],
+            arg=[
+                sel.DM_DIALOG_SELECTOR,
+                sel.DM_ONE_MSG_LIMIT,
+                [sel.DM_INPUT_SELECTOR, sel.DM_INPUT_SELECTOR_ALT],
+            ],
             timeout=hint_timeout,
         )
-        logger.debug("浮窗系统提示已出现 -> 内部组件 mount 完成")
+        logger.debug("浮窗可交互信号已出现(提示文字或输入框 hit-test 命中)")
     except Exception:
-        logger.debug("未捕获「%s」提示(可能是老会话),回落固定 %.1fs 缓冲", sel.DM_ONE_MSG_LIMIT, fallback_buffer_s)
+        logger.debug("提示文字与输入框 hit-test 均未就绪,回落固定 %.1fs 缓冲", fallback_buffer_s)
         await asyncio.sleep(fallback_buffer_s)
     return True

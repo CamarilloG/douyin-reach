@@ -7,12 +7,11 @@ import asyncio
 import logging
 import random
 import threading
-from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 from src.backend.data import db, crud
 from src.backend.browser import BrowserEngine
-from src.backend.dm import DMSender, CreatorDMSender
+from src.backend.dm import DMSender
 from .state import (
     TaskStatus,
     ensure_transition,
@@ -96,9 +95,10 @@ def run_sending(task_id: int) -> bool:
             _clear_stop(task_id)
             release_sending(task_id)
 
+    # 先写状态再启动线程:避免线程的快速失败路径先写终态后又被这里覆盖回 sending
+    set_task_status(task_id, TaskStatus.sending.value)
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
-    set_task_status(task_id, TaskStatus.sending.value)
     return True
 
 
@@ -116,9 +116,6 @@ async def _run_sending_async(task_id: int) -> None:
     retry_limit = task.get("retry_limit")
     if retry_limit is None:
         retry_limit = _MAX_RETRY
-    dm_channel = (task.get("dm_channel") or "main").strip() or "main"
-    if dm_channel not in ("main", "creator"):
-        dm_channel = "main"
 
     # 创建发送 execution 记录
     exec_id = crud.task_execution_start(conn, task_id)
@@ -133,28 +130,7 @@ async def _run_sending_async(task_id: int) -> None:
             crud.task_execution_finish(conn, exec_id, "failed", msg)
             return
 
-        if dm_channel == "creator":
-            sender: Any = CreatorDMSender(engine)
-            crud.log_insert(conn, task_id, "info", "send_pipeline", "发送通道: 创作者中心")
-            # 提前打开创作者中心 tab：
-            # 1) 让用户立刻看到；2) 避免每条首次进入时等加载；
-            # 3) 作为"账号是否开通创作者身份 / 创作者后台是否可达"的前置校验 ——
-            #    若这里失败，后续每条都会失败，应当立刻中止整个流水线。
-            try:
-                await engine.ensure_creator_tab()
-                crud.log_insert(
-                    conn, task_id, "info", "send_pipeline", "已打开创作者中心 chat 页（待发送触发后同步会话）"
-                )
-            except Exception as e:
-                err_msg = f"创作者中心 chat 页打开失败: {e}"
-                logger.warning(err_msg)
-                crud.log_insert(conn, task_id, "error", "send_pipeline", err_msg)
-                set_task_status(task_id, TaskStatus.error.value, last_error=err_msg)
-                crud.task_execution_finish(conn, exec_id, "failed", err_msg)
-                return
-        else:
-            sender = DMSender(engine)
-            crud.log_insert(conn, task_id, "info", "send_pipeline", "发送通道: 主站")
+        sender = DMSender(engine)
         success_count = 0
         failed_count = 0
         send_index = 0  # 多模板轮询索引
@@ -187,7 +163,6 @@ async def _run_sending_async(task_id: int) -> None:
             sec_uid = row["sec_uid"]
             user_id = row["user_id"]
             target_id = row.get("target_id")
-            nickname = row.get("nickname") or ""
             # 多模板按发送序号轮询(模板原文,不做变量替换)
             msg = sender.render_message(template, index=send_index)
             send_index += 1
@@ -197,10 +172,7 @@ async def _run_sending_async(task_id: int) -> None:
             retry_count = 0
             result = None
             while retry_count <= retry_limit:
-                if dm_channel == "creator":
-                    result = await sender.send_dm(sec_uid, nickname, msg)
-                else:
-                    result = await sender.send_dm(sec_uid, msg)
+                result = await sender.send_dm(sec_uid, msg)
                 if result and result.success:
                     break
                 if result and not result.retryable:
@@ -215,7 +187,7 @@ async def _run_sending_async(task_id: int) -> None:
             if result and result.success:
                 crud.send_record_insert(
                     conn, task_id, user_id, target_id, msg, "success",
-                    channel=dm_channel,
+                    channel="main",
                 )
                 success_count += 1
                 crud.log_insert(conn, task_id, "info", "send_pipeline", f"已向 {row.get('nickname', sec_uid)} 发送私信")
@@ -227,10 +199,10 @@ async def _run_sending_async(task_id: int) -> None:
                 crud.send_record_insert(
                     conn, task_id, user_id, target_id, msg or "", record_status,
                     failure_reason=reason, retry_count=retry_count,
-                    channel=dm_channel,
+                    channel="main",
                 )
                 failed_count += 1
-                log_level = "info" if is_business_skip else "warn"
+                log_level = "info" if is_business_skip else "warning"
                 skip_tag = "（已跳过）" if is_business_skip else ""
                 crud.log_insert(conn, task_id, log_level, "send_pipeline",
                                 f"发送失败{skip_tag}({row.get('nickname', sec_uid)}): {reason}")

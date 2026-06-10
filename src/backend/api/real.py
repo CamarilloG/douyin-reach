@@ -61,7 +61,6 @@ def _task_to_api(
         "send_interval": task["send_interval"],
         "daily_limit": task["daily_limit"],
         "task_limit": task["task_limit"],
-        "dm_channel": task.get("dm_channel") or "main",
         "auto_send": bool(task.get("auto_send")),
         "created_at": task["created_at"],
         "updated_at": task["updated_at"],
@@ -147,7 +146,6 @@ class RealApi(Api):
                 send_interval=int(data.get("send_interval", 30)),
                 daily_limit=int(data.get("daily_limit", 100)),
                 task_limit=int(data.get("task_limit", 500)),
-                dm_channel=(data.get("dm_channel") or "main"),
             )
             keywords = data.get("keywords") or []
             if isinstance(keywords, list):
@@ -189,7 +187,6 @@ class RealApi(Api):
                 send_interval=data.get("send_interval"),
                 daily_limit=data.get("daily_limit"),
                 task_limit=data.get("task_limit"),
-                dm_channel=data.get("dm_channel") if "dm_channel" in data else None,
             )
             if "keywords" in data:
                 kw = data["keywords"] if isinstance(data["keywords"], list) else []
@@ -382,14 +379,16 @@ class RealApi(Api):
             if not t:
                 return {"ok": False, "error": "任务不存在"}
             status = t["status"]
-            selected = conn.execute(
-                "SELECT COUNT(*) FROM target_list WHERE task_id = ? AND selected = 1",
-                (task_id,),
-            ).fetchone()[0]
+            # 校验口径与发送链路取数(target_list_pending_for_send)保持一致:
+            # auto_send=True 取全部未成功(无需勾选), False 仅取已勾选且未成功
+            auto_send = bool(t.get("auto_send"))
+            pending = crud.target_list_pending_for_send_count(conn, task_id, auto_send)
         finally:
             conn.close()
-        if selected <= 0:
-            return {"ok": False, "error": "没有勾选任何目标用户,请到「采集明细」勾选后再启动"}
+        if pending <= 0:
+            if auto_send:
+                return {"ok": False, "error": "待发名单为空,请先执行筛选生成名单"}
+            return {"ok": False, "error": "没有可发送的目标用户,请到「采集明细」勾选后再启动"}
         ok = send_pipeline.run_sending(task_id)
         if not ok:
             return {"ok": False, "error": f"任务当前状态 '{status}' 不允许启动发送(或已有任务在发送中)"}

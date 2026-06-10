@@ -58,17 +58,17 @@ def task_create(
     send_interval: int = 30,
     daily_limit: int = 100,
     task_limit: int = 500,
-    dm_channel: str = "main",
 ) -> int:
     now = _TS()
+    # dm_channel 列保留在 schema 中(兼容旧库),走 DEFAULT 'main',不再作为参数
     cur = conn.execute(
         """INSERT INTO tasks (
             name, status, auto_send, max_comments_per_video,
             max_videos_per_keyword, max_scrolls_per_keyword,
             video_timeout, sort_mode, publish_time, publish_time_start, publish_time_end,
             video_duration, search_scope, content_form, filter_enabled, retry_limit,
-            template, send_interval, daily_limit, task_limit, dm_channel, created_at, updated_at
-        ) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            template, send_interval, daily_limit, task_limit, created_at, updated_at
+        ) VALUES (?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             name,
             1 if auto_send else 0,
@@ -89,7 +89,6 @@ def task_create(
             send_interval,
             daily_limit,
             task_limit,
-            dm_channel if dm_channel in ("main", "creator") else "main",
             now,
             now,
         ),
@@ -131,7 +130,6 @@ def task_update(
     send_interval: Optional[int] = None,
     daily_limit: Optional[int] = None,
     task_limit: Optional[int] = None,
-    dm_channel: Optional[str] = None,
 ) -> bool:
     t = task_get(conn, task_id)
     if not t:
@@ -181,8 +179,6 @@ def task_update(
         add("daily_limit", daily_limit)
     if task_limit is not None:
         add("task_limit", task_limit)
-    if dm_channel is not None:
-        add("dm_channel", dm_channel if dm_channel in ("main", "creator") else "main")
 
     if not updates:
         return True
@@ -634,7 +630,7 @@ def send_record_insert(
     retry_count: int = 0,
     channel: str = "main",
 ) -> int:
-    """插入发送记录。status: success / failed / skipped。channel: main / creator。"""
+    """插入发送记录。status: success / failed / skipped。channel 固定为 main（历史记录可能存有 creator）。"""
     now = _TS()
     sent_at = now if status == "success" else None
     cur = conn.execute(

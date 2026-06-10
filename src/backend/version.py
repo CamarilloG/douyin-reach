@@ -15,7 +15,7 @@
 """
 from __future__ import annotations
 
-VERSION = "1.0.0c1"
+VERSION = "1.0.0c2"
 APP_NAME = "抖音助手 商业版"
 
 

@@ -256,34 +256,3 @@ LOGIN_OVERLAY_TEXTS = ("扫码登录", "验证码登录", "密码登录", "登�
 
 # ---------- 评论列表接口（www-hj 域名，用于可选接口拉取） ----------
 COMMENT_LIST_API_TEMPLATE = "https://www-hj.douyin.com/aweme/v1/web/comment/list/"
-
-# ---------- 创作者中心私信（M7+ 通道切换） ----------
-# 审核宽松，支持微信号/链接；走 DOM 自动化。实测要点见 docs/DOM调研.txt。
-# hash 类名全部使用 [class*="..."] 前缀匹配，抗 Semi Design CSS-in-JS 发版漂移。
-CREATOR_HOME_URL = "https://creator.douyin.com/creator-micro/home"
-CREATOR_CHAT_URL = "https://creator.douyin.com/creator-micro/data/following/chat"
-
-# 会话列表容器：ReactVirtualized 虚拟列表（!! 不在可视区的 <li> 可能未渲染到 DOM）
-# 新会话通常置顶，所以大多数场景不需要滚动；如果需要往下找较老的会话，
-# 要主动滚动这个容器触发懒加载。
-CREATOR_VIRT_LIST = ".ReactVirtualized__Grid.ReactVirtualized__List"
-# 会话列表单项（稳定语义类）
-CREATOR_CONV_ITEM = "li.semi-list-item"
-# 当前选中会话（点击后 li 会追加 hash 前缀 "active-xxxx"，用前缀匹配）
-CREATOR_CONV_ACTIVE = 'li.semi-list-item[class*="active"]'
-# 会话行内元素（hash 类名前缀匹配）
-CREATOR_CONV_NAME = '[class*="item-header-name"]'
-CREATOR_CONV_TIME = '[class*="item-header-time"]'
-# 聊天输入框（contenteditable div，不是 textarea / DraftJS）
-CREATOR_INPUT_SELECTOR = 'div[contenteditable="true"][class*="chat-input"]'
-# 输入框父容器（备用锚点）
-CREATOR_CHAT_EDITOR = '[class*="chat-editor"]'
-# 发送按钮（类含 chat-btn，输入为空时 disabled=true）
-CREATOR_SEND_BTN_SELECTOR = "button.chat-btn, button[class*=\"chat-btn\"]"
-# 发送按钮父容器（备用锚点）
-CREATOR_CHAT_FOOTER = '[class*="chat-footer"]'
-# 消息气泡（用于发送后验证最新气泡文本 == 刚发文本）
-# 注意：气泡外层类名此次调研未给出，首次实测时若此前缀不中需立即修正。
-CREATOR_MSG_BUBBLE = '[class*="chat-bubble"]'
-# 错误 toast（Semi Design 标准类）
-CREATOR_ERROR_TOAST = ".semi-toast-error"

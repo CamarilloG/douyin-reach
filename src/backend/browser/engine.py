@@ -160,7 +160,6 @@ class BrowserEngine:
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._page: Page | None = None
-        self._creator_page: Page | None = None
         self._browser_process: subprocess.Popen | None = None
         self._owns_browser_process = False
         self._consecutive_not_found = 0
@@ -849,7 +848,10 @@ class BrowserEngine:
                 return False
             await self._page.evaluate("window.scrollBy(0, window.innerHeight)")
             await self._risk_state.delay_normal()
-            return "/video/" in self._page.url
+            # 图文内容详情页 URL 是 /note/{id}（goto /video/{id} 会 302 跳到 /note/），
+            # 其评论区结构与视频页一致、能正常抓取。只认 /video/ 会把图文全部误判为
+            # “进入失败”而跳过（2026-06 实测：关键词「美食」搜索结果几乎全是图文）。
+            return "/video/" in self._page.url or "/note/" in self._page.url
         except Exception as e:
             logger.debug("进入视频详情失败: %s", e)
             if not _is_technical_error(e):
@@ -1192,38 +1194,6 @@ class BrowserEngine:
             logger.warning("抓取用户信息异常: %s", e)
             return {}
 
-    async def ensure_creator_tab(self) -> Page:
-        """确保创作者中心 chat 页面已打开；首次调用时新建 tab，后续复用。
-
-        加载失败时**不缓存**空白 page，并向上抛出异常 —— 让 send_pipeline 能明确
-        识别并中止，而不是在空白页上继续做后续操作。
-        """
-        if self._creator_page and not self._creator_page.is_closed():
-            return self._creator_page
-        if not self._context:
-            raise RuntimeError("BrowserContext 未就绪，无法打开创作者中心 tab")
-        page = await self._context.new_page()
-        try:
-            await page.goto(sel.CREATOR_CHAT_URL, wait_until="domcontentloaded", timeout=20000)
-        except Exception as e:
-            logger.warning("创作者中心 chat 页加载失败: %s", e)
-            try:
-                await page.close()
-            except Exception:
-                pass
-            raise RuntimeError(f"创作者中心 chat 页加载失败: {e}") from e
-        self._creator_page = page
-        return page
-
-    async def close_creator_tab(self) -> None:
-        if self._creator_page and not self._creator_page.is_closed():
-            try:
-                await self._creator_page.close()
-            except Exception as e:
-                if not _is_browser_closed_error(e):
-                    logger.warning("关闭创作者中心 tab 失败: %s", e)
-        self._creator_page = None
-
     def get_risk_level(self) -> RiskLevel:
         return self._risk_state.level
 
@@ -1245,7 +1215,6 @@ class BrowserEngine:
             return
         # 独立标签页模式：只关闭自己开的 tab，不关浏览器/context
         if self._use_new_page:
-            await self.close_creator_tab()
             if self._page:
                 try:
                     await self._page.close()
@@ -1265,7 +1234,6 @@ class BrowserEngine:
             self._context = None
             logger.info("标签页已关闭（浏览器保持运行）")
             return
-        await self.close_creator_tab()
         try:
             if self._browser and self._owns_browser_process:
                 await self._browser.close()
